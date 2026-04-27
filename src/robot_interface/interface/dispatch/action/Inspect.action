@@ -1,0 +1,7 @@
+RequestHeader header
+string request
+---
+ResponseHeader header
+string result
+---
+string feedback

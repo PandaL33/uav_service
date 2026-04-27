@@ -1,0 +1,5 @@
+string algo_name
+string action  # "start" 或 "stop"
+---
+bool success
+string message

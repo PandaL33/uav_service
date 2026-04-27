@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>multi_algo_manager</name>
+  <version>0.0.1</version>
+  <description>Multi-algorithm manager demo for ROS2 with service control</description>
+  <maintainer email="guanglei.lian@ropeok.com">lianguanglei</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>multi_algo_interfaces</depend>
+
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

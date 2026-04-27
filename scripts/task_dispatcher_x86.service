@@ -1,0 +1,30 @@
+[Unit]
+Description=ROS2 Task Dispatcher Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/cat/uav_service
+
+Environment="ROS_DOMAIN_ID=0"
+Environment="ROS_LOCALHOST_ONLY=0"
+Environment="ROS_LOG_DIR=/home/cat/uav_service/logs"
+Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"
+
+# 创建日志目录
+ExecStartPre=/bin/mkdir -p /home/cat/uav_service/logs
+
+# 启动 ROS2 节点，日志同时输出到 journal 和文件
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch task_dispatcher task_dispatcher.launch.py | tee -a /home/cat/uav_service/logs/task_dispatcher.log"
+
+Restart=always
+RestartSec=5
+StandardOutput=journal+console
+StandardError=journal+console
+
+# 日志清理
+ExecStartPost=/bin/bash -c "find /home/cat/uav_service/logs -name '*.log' -size +100M -delete && find /home/cat/uav_service/logs -name '*.log.*' -mtime +7 -delete"
+
+[Install]
+WantedBy=multi-user.target

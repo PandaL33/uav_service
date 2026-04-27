@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>task_dispatcher</name>
+  <version>0.0.1</version>
+  <description>Task dispatcher node for ROS2 that subscribes to MQTT messages and calls ROS services</description>
+  <maintainer email="guanglei.lian@ropeok.com">lianguanglei</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>multi_algo_interfaces</depend>
+  <depend>robot_interface</depend>
+
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

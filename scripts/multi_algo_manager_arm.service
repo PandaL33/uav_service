@@ -1,0 +1,28 @@
+[Unit]
+Description=ROS2 Multi Algorithm Manager Service
+After=network.target
+
+[Service]
+Type=simple
+# 必须配置ztl，可能是编译的时候基于ztl用户编译的
+User=ztl
+WorkingDirectory=/home/ztl/algo/ros2_ws
+
+Environment="ROS_DOMAIN_ID=27"
+Environment="ROS_LOCALHOST_ONLY=0"
+Environment="ROS_LOG_DIR=/home/ztl/algo/ros2_ws/logs"
+Environment="PYTHONPATH=$PYTHONPATH:/home/ztl/.local/lib/python3.10/site-packages"
+
+# 创建日志目录
+ExecStartPre=/bin/mkdir -p /home/ztl/algo/ros2_ws/logs
+
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch multi_algo_manager multi_algo_manager.launch.py | tee -a /home/ztl/algo/ros2_ws/logs/multi_algo_manager.log"
+Restart=always
+RestartSec=5
+StandardOutput=journal+console
+StandardError=journal+console
+# 日志清理
+ExecStartPost=/bin/bash -c "find /home/ztl/algo/ros2_ws/logs -name '*.log' -size +100M -delete && find /home/ztl/algo/ros2_ws/logs -name '*.log.*' -mtime +7 -delete"
+
+[Install]
+WantedBy=multi-user.target
