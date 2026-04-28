@@ -143,7 +143,12 @@ class PerformActionManager:
             distance = math.sqrt(dx**2 + dy**2 + dz**2)
             
             # 6. 判断结果
-            if distance < 0.4:
+            # 根据目标位置设置不同的距离阈值
+            if tx == 0.0 and ty == 0.0 and tz == 1.0:
+                threshold = 0.2
+            else:
+                threshold = 0.4
+            if distance < threshold:
                 return True
                 
             return False

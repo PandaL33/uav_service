@@ -440,16 +440,16 @@ class CruiseUavTaskManager:
             self.ros_topic_subscriber.set_cruises(self.cruises)
             self.perform_action_manager.set_stop_action(False)
 
-            # 检查地图是否存在，如果不存在则进行更新
-            map_file_id = task_data['mapFileId']
-            map_file_uri = task_data['mapFileUri']
+            # # 检查地图是否存在，如果不存在则进行更新
+            # map_file_id = task_data['mapFileId']
+            # map_file_uri = task_data['mapFileUri']
             
-            rmap = self.map_manager.update_pcd_map(map_file_id, map_file_uri)
-            logger.info(f"更新pcd地图完成: {rmap}")
+            # rmap = self.map_manager.update_pcd_map(map_file_id, map_file_uri)
+            # logger.info(f"更新pcd地图完成: {rmap}")
 
             # 第二步：执行巡检任务
             # 开始巡检录像
-            self.rtst_record_manager.start_recording(task_id, save_record=True, upload_callback=self.on_video_uploaded)
+            # self.rtst_record_manager.start_recording(task_id, save_record=True, upload_callback=self.on_video_uploaded)
             
             cruises = task_data.get('cruises', [])            
             # 记录启动中的算法
@@ -497,7 +497,7 @@ class CruiseUavTaskManager:
             self.uav_action_manager.exec_land_command()
             
             # 巡检任务完成,停止录像
-            self.rtst_record_manager.stop_recording()
+            # self.rtst_record_manager.stop_recording()
             
 
             # 第三步：巡检任务完成，关闭所有未关闭的算法
@@ -577,11 +577,6 @@ class CruiseUavTaskManager:
                         logger.error(f'起飞序列执行异常: {str(e)}')
                         dock_status, dock_msg = False, str(e)
 
-
-                logger.info('启动ego_planner.service服务...')
-                subprocess.Popen(['sudo', 'systemctl', 'start', 'ego_planner.service'], timeout=120)
-                logger.info('启动ego_planner.service服务操作完成')
-                
                 # 起飞前状态检测
                 if ENABLE_PREFLIGHT_CHECK:
                     # if self.node.get_uav_fault_inspection() == False:
@@ -592,6 +587,17 @@ class CruiseUavTaskManager:
                         logger.warning(msg)
                         self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
                         return
+                    
+                # 检查地图是否存在，如果不存在则进行更新
+                map_file_id = body['mapFileId']
+                map_file_uri = body['mapFileUri']
+                
+                rmap = self.map_manager.update_pcd_map(map_file_id, map_file_uri)
+                logger.info(f"更新pcd地图完成: {rmap}")
+                
+                logger.info('启动ego_planner.service服务...')
+                subprocess.run(['sudo', 'systemctl', 'start', 'ego_planner.service'], timeout=120)
+                logger.info('启动ego_planner.service服务操作完成')
                 
                 # 执行巡检任务    
                 self._processing_cruise_task(task_id, body)
@@ -607,7 +613,7 @@ class CruiseUavTaskManager:
                         
                 # 关闭导航服务
                 logger.info('停止ego_planner.service服务...')
-                subprocess.run(['sudo', 'systemctl', 'stop', 'ego_planner.service'], timeout=120)
+                subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
                 logger.info('停止ego_planner.service服务操作完成')
                 
             else:
@@ -859,7 +865,6 @@ class CruiseUavTaskManager:
             future = map_save_client.call_async(request)
             
             # 4. 等待服务调用结果（添加超时机制防止死循环）
-            start_time = time.time()
             service_timeout = 60.0  # 服务调用超时时间（秒）
             # rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
             
