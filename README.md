@@ -595,3 +595,412 @@ sudo ./install_task_dispatcher_service.sh
 3. 对于较大的项目，可以使用`--packages-select`参数只编译需要的包，节省时间
 
 这个系统可以帮助您灵活地管理多个算法，按需启动和停止，同时获取实时的算法运行结果。
+
+# Task Manual Manager 使用文档
+
+## 概述
+
+`task_manual_manager.py` 是一个独立的手动任务管理脚本，用于在不依赖 ROS2 节点的情况下执行任务状态上报和点云上传功能。该脚本提供了命令行接口，可以方便地进行任务管理和文件上传操作。
+
+## 功能特性
+
+- ✅ **任务状态上报**：支持上报任务的启动、进行中、完成、中断、取消等状态
+- ✅ **点云文件上传**：支持将点云文件上传到服务器，带自动重试机制
+- ✅ **网络连接检测**：自动检测网络状态，网络恢复后自动重试
+- ✅ **指数退避策略**：智能重试间隔（10秒 → 20秒 → 40秒 → 60秒）
+- ✅ **独立运行**：无需 ROS2 环境，可直接通过 Python 命令执行
+- ✅ **完善的日志**：详细的操作日志输出，便于调试和追踪
+
+## 默认配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--server-url` | `https://127.0.0.1:81` | 服务器地址 |
+| `--robot-sn` | `UAV00002` | 机器人序列号 |
+| `--pcd-file` | `/home/cat/slam_data/pcd/test.pcd` | 点云文件路径 |
+| `--version` | `1.0` | 版本号 |
+| `--max-retries` | `1` | 最大重试次数 |
+
+## 安装与依赖
+
+### 系统要求
+
+- Python 3.6+
+- 以下 Python 库：
+  - `requests`
+  - `argparse`（Python 标准库）
+
+### 安装依赖
+
+```bash
+pip install requests
+```
+
+## 使用方法
+
+### 基本语法
+
+```bash
+python3 task_manual_manager.py --action <动作类型> [选项]
+```
+
+### 动作类型
+
+脚本支持两种主要动作：
+
+1. **report-status**：上报任务状态
+2. **upload-pcd**：上传点云文件
+
+---
+
+## 动作一：上报任务状态 (report-status)
+
+### 功能说明
+
+向服务器上报任务的执行状态，包括任务进度、消息内容、关联文件等信息。
+
+### 必需参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `--action` | string | 固定为 `report-status` |
+| `--task-id` | string | 任务ID |
+| `--status` | int | 任务状态码（0-4） |
+
+### 可选参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--server-url` | string | `https://127.0.0.1:81` | 服务器URL |
+| `--robot-sn` | string | `UAV00002` | 机器人序列号 |
+| `--version` | string | `1.0` | 版本号 |
+| `--message` | string | `''` | 状态消息 |
+| `--file-id` | string | `''` | 关联的文件ID |
+| `--file-type` | string | `''` | 文件类型（如：pcd, jpg, mp4） |
+
+### 状态码说明
+
+| 状态码 | 含义 | 使用场景 |
+|--------|------|----------|
+| 0 | STARTED | 任务已启动 |
+| 1 | IN_PROGRESS | 任务进行中 |
+| 2 | COMPLETED | 任务已完成 |
+| 3 | ABORTED | 任务中断 |
+| 4 | CANCELED | 任务取消 |
+
+### 使用示例
+
+#### 示例 1：上报任务启动
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action report-status \
+  --status 0
+```
+
+#### 示例 2：上报任务进行中
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action report-status \
+  --status 1 \
+  --message "正在执行巡检任务"
+```
+
+#### 示例 3：上报任务完成并关联文件
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action report-status \
+  --status 2 \
+  --message "任务已完成" \
+  --file-id file_12345 \
+  --file-type pcd
+```
+
+#### 示例 4：上报任务中断
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action report-status \
+  --status 3 \
+  --message "任务因异常中断"
+```
+
+#### 示例 5：使用自定义服务器和机器人序列号
+
+```bash
+python3 task_manual_manager.py \
+  --server-url https://192.168.1.100:8080 \
+  --robot-sn ROBOT999 \
+  --task-id task_002 \
+  --action report-status \
+  --status 1 \
+  --message "自定义配置的任务上报"
+```
+
+---
+
+## 动作二：上传点云文件 (upload-pcd)
+
+### 功能说明
+
+将点云文件上传到服务器，支持自动重试和网络连接检测。上传成功后会返回文件ID。
+
+### 必需参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `--action` | string | 固定为 `upload-pcd` |
+| `--task-id` | string | 任务ID |
+
+### 可选参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--server-url` | string | `https://127.0.0.1:81` | 服务器URL |
+| `--robot-sn` | string | `UAV00002` | 机器人序列号 |
+| `--version` | string | `1.0` | 版本号 |
+| `--pcd-file` | string | `/home/cat/slam_data/pcd/test.pcd` | 点云文件路径 |
+| `--max-retries` | int | `1` | 最大重试次数 |
+
+### 重试机制说明
+
+- **初始重试间隔**：10秒
+- **最大重试间隔**：60秒
+- **退避策略**：指数退避（10s → 20s → 40s → 60s）
+- **网络检测**：每次重试前检查网络连接
+- **失败处理**：达到最大重试次数后停止并返回错误
+
+### 使用示例
+
+#### 示例 1：使用默认配置上传点云
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action upload-pcd
+```
+
+这将使用默认的点云文件路径 `/home/cat/slam_data/pcd/test.pcd` 进行上传。
+
+#### 示例 2：指定点云文件路径
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action upload-pcd \
+  --pcd-file /path/to/custom/point_cloud.pcd
+```
+
+#### 示例 3：设置重试次数
+
+```bash
+python3 task_manual_manager.py \
+  --task-id task_001 \
+  --action upload-pcd \
+  --pcd-file /home/cat/slam_data/pcd/test.pcd \
+  --max-retries 3
+```
+
+这将最多重试3次（共4次尝试：1次初始 + 3次重试）。
+
+#### 示例 4：完整配置示例
+
+```bash
+python3 task_manual_manager.py \
+  --server-url https://127.0.0.1:81 \
+  --robot-sn UAV00002 \
+  --task-id task_003 \
+  --action upload-pcd \
+  --pcd-file /home/cat/slam_data/pcd/map_20240101.pcd \
+  --max-retries 5
+```
+
+---
+
+## 输出格式
+
+### 成功输出
+
+脚本执行成功后会以 JSON 格式输出结果：
+
+#### report-status 成功输出
+
+```json
+{
+  "sn": "UAV00002",
+  "ver": "1.0",
+  "seq": "a1b2c3d4e5f6...",
+  "type": 1,
+  "ts": 1704067200000,
+  "cmd": "ActionReport",
+  "body": {
+    "taskId": "task_001",
+    "pos": {},
+    "message": "任务进行中",
+    "taskProgress": 1,
+    "tsReport": 1704067200000,
+    "fileId": "",
+    "fileType": ""
+  }
+}
+```
+
+#### upload-pcd 成功输出
+
+```json
+{
+  "success": true,
+  "file_id": "file_12345"
+}
+```
+
+### 失败输出
+
+```json
+{
+  "success": false,
+  "error": "上传失败"
+}
+```
+
+---
+
+## 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| 0 | 执行成功 |
+| 1 | 执行失败 |
+| 130 | 用户中断（Ctrl+C） |
+
+---
+
+## 日志说明
+
+脚本使用 Python 的 logging 模块输出日志，日志级别为 INFO。
+
+### 日志示例
+
+```
+2024-01-01 12:00:00,000 - task_manual_manager - INFO - 手动任务管理器初始化完成，服务器地址: https://jf-jszntxk.test.xmschain.com:81
+2024-01-01 12:00:00,001 - task_manual_manager - INFO - 执行动作: 上报任务状态
+2024-01-01 12:00:00,002 - task_manual_manager - INFO - 任务状态上报信息:
+2024-01-01 12:00:00,002 - task_manual_manager - INFO -   任务ID: task_001
+2024-01-01 12:00:00,002 - task_manual_manager - INFO -   进度: 1
+2024-01-01 12:00:00,002 - task_manual_manager - INFO -   消息: 任务进行中
+2024-01-01 12:00:00,003 - task_manual_manager - INFO - 任务状态上报成功
+```
+
+---
+
+## 常见问题
+
+### Q1: 如何查看帮助信息？
+
+```bash
+python3 task_manual_manager.py --help
+```
+
+### Q2: 点云文件不存在怎么办？
+
+确保 `--pcd-file` 参数指定的文件路径存在且可访问：
+
+```bash
+ls -l /home/cat/slam_data/pcd/test.pcd
+```
+
+### Q3: 上传失败如何处理？
+
+1. 检查网络连接是否正常
+2. 确认服务器地址是否正确
+3. 增加重试次数：`--max-retries 5`
+4. 查看详细日志输出
+
+### Q4: 如何在脚本中使用 MQTT 上报？
+
+当前版本仅支持控制台输出和日志记录。如需 MQTT 支持，需要修改代码传入 MQTT 客户端实例。
+
+### Q5: 如何修改认证信息？
+
+编辑 `task_manual_manager.py` 文件中的 `auth_config` 字典：
+
+```python
+self.auth_config = {
+    'USERNAME': 'your_username',
+    'PASSWORD': 'your_password',
+    'TOKEN_ENDPOINT': '/file/provider/v1/file/getUploadTaskToken'
+}
+```
+
+---
+
+## 高级用法
+
+### 批量上报任务状态
+
+创建 shell 脚本批量处理：
+
+```bash
+#!/bin/bash
+
+TASK_IDS=("task_001" "task_002" "task_003")
+
+for task_id in "${TASK_IDS[@]}"; do
+    echo "处理任务: $task_id"
+    python3 task_manual_manager.py \
+      --task-id "$task_id" \
+      --action report-status \
+      --status 1 \
+      --message "批量处理中"
+    
+    if [ $? -eq 0 ]; then
+        echo "任务 $task_id 上报成功"
+    else
+        echo "任务 $task_id 上报失败"
+    fi
+    
+    sleep 1
+done
+```
+
+### 结合其他工具使用
+
+```bash
+# 查找所有点云文件并上传
+find /home/cat/slam_data/pcd -name "*.pcd" | while read file; do
+    task_id="task_$(basename $file .pcd)"
+    python3 task_manual_manager.py \
+      --task-id "$task_id" \
+      --action upload-pcd \
+      --pcd-file "$file"
+done
+```
+
+---
+
+## 技术细节
+
+### API 端点
+
+- **获取上传 Token**: `{server_url}/file/provider/v1/file/getUploadTaskToken?fileProperties=0`
+- **上传文件**: `{server_url}/file/file/upload/{token}`
+
+### 认证方式
+
+使用 HTTP Basic Authentication：
+- 用户名：`robot-manage`
+- 密码：`123`
+
+### 请求超时设置
+
+- Token 获取：5秒
+- 文件上传：300秒（5分钟）
+- 网络检测：5秒
+
+---
