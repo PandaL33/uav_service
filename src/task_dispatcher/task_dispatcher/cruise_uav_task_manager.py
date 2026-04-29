@@ -25,7 +25,7 @@ from enum import Enum
 from std_srvs.srv import Trigger
 from rclpy.client import Client
 from requests.auth import HTTPBasicAuth
-from .config import ROBOT_TYPE, PCD_FILE_PATH
+from .config import ROBOT_TYPE, PCD_FILE_PATH, ENABLE_MANUAL_CONTROL
 from .config import ENABLE_PREFLIGHT_CHECK, ENABLE_DOCK_CONTROL, WIND_SPEED_THRESHOLD, RAINFALL_THRESHOLD  # 引入配置文件中的URL和点云文件路径
 from uav_command_sender import UavCommandSender
 from dock_control_client import DockControlClient
@@ -451,66 +451,84 @@ class CruiseUavTaskManager:
             # 开始巡检录像
             # self.rtst_record_manager.start_recording(task_id, save_record=True, upload_callback=self.on_video_uploaded)
             
-            cruises = task_data.get('cruises', [])            
-            # 记录启动中的算法
-            starting_algo_ids = []
-            action_idx = 0
-            for cruise in cruises:
-                pos = cruise.get('pos')
-                ing_actions = cruise.get('ingActions', [])
-                end_actions = cruise.get('endActions', [])
-                cruise_idx = cruise.get('idx', 0)
+            if ENABLE_MANUAL_CONTROL:
+                logger.info(f"等待无人机解锁并起飞...")
+                while self.is_executing:
+                    takeoff_time, arming_state = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
+                    logger.info(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
+                    # 无人机已经解锁并起飞
+                    if takeoff_time > 0 and arming_state == 2:
+                        break
+                    time.sleep(1)
 
-                logger.info(f"ing_actions: {ing_actions}, end_actions:{end_actions}")
+                logger.info(f"等待无人机降落...")
+                while self.is_executing:
+                    takeoff_time, arming_state = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
+                    logger.info(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
+                    # 无人机已经降落
+                    if takeoff_time == 0 and arming_state == 1:
+                        break
+                    time.sleep(1)
+                    
+                logger.info(f"无人机已经降落，任务已完成")
+            else:    
+                cruises = task_data.get('cruises', [])            
+                # 记录启动中的算法
+                starting_algo_ids = []
+                action_idx = 0
+                for cruise in cruises:
+                    pos = cruise.get('pos')
+                    ing_actions = cruise.get('ingActions', [])
+                    end_actions = cruise.get('endActions', [])
+                    cruise_idx = cruise.get('idx', 0)
+
+                    logger.info(f"ing_actions: {ing_actions}, end_actions:{end_actions}")
+                    
+                    # 1、处理ingActions
+                    # 是否需要停止任务, 最新的动作索引, 启动的算法列表
+                    should_stop, action_idx, _ = self._process_ing_actions(task_id, ing_actions, starting_algo_ids, action_idx)
+                    if should_stop:
+                        self.rtst_record_manager.stop_recording()
+                        return
+
+                    # 2、处理move动作
+                    result_action = self.perform_action_manager.perform_action_walk_to_pos_3d(pos)
+                    if not result_action.get('success', False):
+                        logger.error(f'移动动作执行失败，已停止')
+                        self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')
+                        self.rtst_record_manager.stop_recording()
+                        return
+
+                    action_idx += 1
+                    self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 第{action_idx}个动作执行完成，移动到目标位置')
+                    logger.info(f"执行巡检任务task_id={task_id}, 【第{action_idx}个动作】执行完成, 移动到目标位置")
+                                    
+                    # 3、处理endActions中的动作
+                    # 是否需要停止任务, 最新的动作索引, 启动的算法列表
+                    should_stop, action_idx, _ = self._process_end_actions(task_id, end_actions, starting_algo_ids, action_idx)
+                    if should_stop:
+                        self.rtst_record_manager.stop_recording()
+                        return
+                    
+                    self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 完成【第{cruise_idx}段巡检】')
+                    logger.info(f"执行巡检任务task_id={task_id}, 完成【第{cruise_idx}段巡检】")
                 
-                # 1、处理ingActions
-                # 是否需要停止任务, 最新的动作索引, 启动的算法列表
-                should_stop, action_idx, _ = self._process_ing_actions(task_id, ing_actions, starting_algo_ids, action_idx)
-                if should_stop:
-                    self.rtst_record_manager.stop_recording()
-                    return
-
-                # 2、处理move动作
-                result_action = self.perform_action_manager.perform_action_walk_to_pos_3d(pos)
-                if not result_action.get('success', False):
-                    logger.error(f'移动动作执行失败，已停止')
-                    self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')
-                    self.rtst_record_manager.stop_recording()
-                    return
-
-                action_idx += 1
-                self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 第{action_idx}个动作执行完成，移动到目标位置')
-                logger.info(f"执行巡检任务task_id={task_id}, 【第{action_idx}个动作】执行完成, 移动到目标位置")
-                                
-                # 3、处理endActions中的动作
-                # 是否需要停止任务, 最新的动作索引, 启动的算法列表
-                should_stop, action_idx, _ = self._process_end_actions(task_id, end_actions, starting_algo_ids, action_idx)
-                if should_stop:
-                    self.rtst_record_manager.stop_recording()
-                    return
-                
-                self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 完成【第{cruise_idx}段巡检】')
-                logger.info(f"执行巡检任务task_id={task_id}, 完成【第{cruise_idx}段巡检】")
+                # 发送降落指令
+                # self.uav_command_sender.send_command('LAND')                                               
+                self.uav_action_manager.exec_land_command()
             
-            # 发送降落指令
-            # self.uav_command_sender.send_command('LAND')                                               
-            self.uav_action_manager.exec_land_command()
+                # 第三步：巡检任务完成，关闭所有未关闭的算法
+                for algo_id in starting_algo_ids:
+                    result_action = self.perform_action_manager.perform_action_algo(algo_id, False)
+                    if not result_action.get('success', False):
+                        logger.error(f'巡检结束，关闭算法 {algo_id} 失败')
+                        self._report_task_status(task_id, TaskStatus.ABORTED.value, f'巡检结束，关闭算法 {algo_id} 失败')
+                        return
             
             # 巡检任务完成,停止录像
             # self.rtst_record_manager.stop_recording()
-            
-
-            # 第三步：巡检任务完成，关闭所有未关闭的算法
-            for algo_id in starting_algo_ids:
-                result_action = self.perform_action_manager.perform_action_algo(algo_id, False)
-                if not result_action.get('success', False):
-                    logger.error(f'巡检结束，关闭算法 {algo_id} 失败')
-                    self._report_task_status(task_id, TaskStatus.ABORTED.value, f'巡检结束，关闭算法 {algo_id} 失败')
-                    return
-            
             # 处理点云数据
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
-            
             
             time.sleep(1)
             

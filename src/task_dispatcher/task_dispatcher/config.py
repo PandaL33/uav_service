@@ -43,6 +43,9 @@ ENABLE_PREFLIGHT_CHECK = False
 # 是否进行起飞前机舱的控制自检
 ENABLE_DOCK_CONTROL = False
 
+# 是否进行手动控制巡检任务
+ENABLE_MANUAL_CONTROL = False
+
 # 风速阈值
 WIND_SPEED_THRESHOLD = 3.0
 
