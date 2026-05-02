@@ -892,10 +892,10 @@ class CruiseUavTaskManager:
             #     return '', 0.0, 0.0
             executor = SingleThreadedExecutor()
             executor.add_node(self.node)
-            executor.spin_until_future_complete(future, timeout_sec=service_timeout)
+            result = executor.spin_until_future_complete(future, timeout_sec=service_timeout)
             executor.remove_node(self.node)
 
-            if not future.done():
+            if result != rclpy.executors.FutureState.COMPLETED:
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
                 return ''
             

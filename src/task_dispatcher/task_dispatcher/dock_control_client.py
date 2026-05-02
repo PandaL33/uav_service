@@ -134,10 +134,10 @@ class DockControlClient:
         # 等待结果（使用专用Executor避免 "wait set index too big" 错误）
         executor = SingleThreadedExecutor()
         executor.add_node(self.node)
-        executor.spin_until_future_complete(future, timeout_sec=timeout_sec)
+        executorresult = executor.spin_until_future_complete(future, timeout_sec=timeout_sec)
         executor.remove_node(self.node)
 
-        if not future.done():
+        if executorresult != rclpy.executors.FutureState.COMPLETED:
             msg = f"服务 {service_name} 超时 ({timeout_sec}s)"
             logger.error(msg)
             return False, msg
