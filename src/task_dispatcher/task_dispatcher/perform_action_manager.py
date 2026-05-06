@@ -6,7 +6,6 @@ import json
 from typing import Dict, Any, Optional
 from multi_algo_interfaces.srv import AlgoControl
 import rclpy
-from rclpy.client import Client
 from robot_interface.srv import Move, SetCtrlMode
 import time
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
@@ -46,8 +45,12 @@ class PerformActionManager:
 
         self.goal_pose_pub = self.node.create_publisher(PoseStamped, "/goal_pose", 10)
         self.goal_pose_pub_3d = self.node.create_publisher(PoseStamped, "/goal_pose_3d", 10)
-        
-        
+
+        # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
+        self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
+        self.move_client = self.node.create_client(Move, '/rkbot/move')
+        self.mode_client = self.node.create_client(SetCtrlMode, '/rkbot/setctrlmode')
+
         logger.info('执行动作管理器初始化完成')
     
     def angle_to_quat(self, angle_rad, axis='z'):
@@ -504,11 +507,8 @@ class PerformActionManager:
             
             logger.info(f'执行算法动作: 算法ID={algoId}, 使能={enable}')
 
-            # 创建服务客户端
-            algo_client: Client = self.node.create_client(AlgoControl, '/algo_control')
-        
-            # 等待服务可用
-            if not algo_client.wait_for_service(timeout_sec=3.0):
+            # 等待服务可用（复用 __init__ 中创建的客户端）
+            if not self.algo_client.wait_for_service(timeout_sec=3.0):
                 logger.error('算法控制服务不可用')
                 return {
                     'success': False,
@@ -536,7 +536,7 @@ class PerformActionManager:
             else:
                 request.action = "stop"
             
-            future = algo_client.call_async(request)
+            future = self.algo_client.call_async(request)
             future.add_done_callback(lambda f: self._algo_service_callback(f, algoId))
             
             return {
@@ -841,26 +841,23 @@ class PerformActionManager:
             force = argv.get('force', False)
             
             logger.info(f'执行停止动作: 强行停止={force}')
-            
-             # 创建服务客户端
-            move_client = self.node.create_client(Move, '/rkbot/move')
-            
-            # 等待服务可用
-            if not move_client.wait_for_service(timeout_sec=3.0):
+
+            # 等待服务可用（复用 __init__ 中创建的客户端）
+            if not self.move_client.wait_for_service(timeout_sec=3.0):
                 logger.error('移动服务不可用')
                 return {
                     'success': False,
                     'message': '移动服务不可用'
                 }
-            
+
             # 准备请求
             request = Move.Request()
             request.move.vx = 0.0
             request.move.vy = 0.0
             request.move.yaw_rate = 0.0
-            
+
             # 发送异步请求
-            future = move_client.call_async(request)
+            future = self.move_client.call_async(request)
             future.add_done_callback(lambda future: self._move_service_callback(future, 'move'))
             
             return {
@@ -926,28 +923,25 @@ class PerformActionManager:
             }
             
             logger.info(f'执行站立动作: 模式={mode_map[mode]}({mode})')
-            
-            # 创建服务客户端
-            mode_client = self.node.create_client(SetCtrlMode, '/rkbot/setctrlmode')
-            
-            # 等待服务可用
-            if not mode_client.wait_for_service(timeout_sec=3.0):
+
+            # 等待服务可用（复用 __init__ 中创建的客户端）
+            if not self.mode_client.wait_for_service(timeout_sec=3.0):
                 logger.error('控制模式服务不可用')
                 return {
                     'success': False,
                     'message': '控制模式服务不可用'
                 }
-            
+
             # 准备请求
             request = SetCtrlMode.Request()
-            
+
             # 设置模式值, 0-趴下、1-四足直站、2-蹲站;
             request.mode.value = mode
-            
+
             logger.info(f'调用控制模式服务: mode_value={request.mode.value}')
-            
+
             # 异步调用服务
-            future = mode_client.call_async(request)
+            future = self.mode_client.call_async(request)
             future.add_done_callback(lambda f: self._mode_service_callback(f, mode_map[mode]))
 
             # 等待状态

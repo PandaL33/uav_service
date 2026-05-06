@@ -19,7 +19,6 @@ from task_dispatcher.perform_action_manager import PerformActionManager
 from task_dispatcher.point_cloud_persistor import PointCloudPersistor
 from enum import Enum
 from std_srvs.srv import Trigger
-from rclpy.client import Client
 from requests.auth import HTTPBasicAuth
 from .config import ROBOT_TYPE, PCD_FILE_PATH, PCD_FILE_COMPRESS_PATH  # 引入配置文件中的URL和点云文件路径
 import matplotlib.cm as cm
@@ -69,7 +68,9 @@ class PointCloudManager:
         self.point_cloud_persistor.set_upload_callback(self.upload_point_cloud_to_file_server)
         
         self.point_cloud_crop = PointCloudCrop()
-        
+        # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
+        self.map_save_client = self.node.create_client(Trigger, '/map_save')
+
         # 存储巡检任务的字典，key为taskId
         self.tasks: Dict[str, Dict] = {}
         # 当前正在执行的任务ID
@@ -383,19 +384,18 @@ class PointCloudManager:
         try:
             logger.info("开始处理点云数据保存和上传")
             
-            # 1. 创建ROS2服务客户端
-            map_save_client = self.node.create_client(Trigger, '/map_save')
-            
+            # 1. 等待点云保存服务可用（复用 __init__ 中创建的客户端）
+
             logger.info("点云保存等待服务")
-            
+
             # 2. 等待服务可用
-            if not map_save_client.wait_for_service(timeout_sec=5.0):
+            if not self.map_save_client.wait_for_service(timeout_sec=5.0):
                 logger.error("点云保存服务 /map_save 不可用")
                 return '', 0.0, 0.0
             
             # 3. 创建请求并调用服务
             request = Trigger.Request()
-            future = map_save_client.call_async(request)
+            future = self.map_save_client.call_async(request)
             
             # 4. 使用 SingleThreadedExecutor 避免 "wait set index too big" 错误
             service_timeout = 60.0  # 服务调用超时时间（秒）

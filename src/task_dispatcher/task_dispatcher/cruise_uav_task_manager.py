@@ -90,6 +90,8 @@ class CruiseUavTaskManager:
         self.uav_command_sender = UavCommandSender(node, topic_name='/uav_command')
         # 机舱控制
         self.dock_control_client = DockControlClient(node)
+        # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
+        self.map_save_client = self.node.create_client(Trigger, '/map_save')
         # 自检
         self.preflight_check_node = PreFlightCheckNode(
                     node=self.node,
@@ -875,17 +877,14 @@ class CruiseUavTaskManager:
         try:
             logger.info("开始处理点云数据保存和上传")
             
-            # 1. 创建ROS2服务客户端
-            map_save_client = self.node.create_client(Trigger, '/map_save')
-            
-            # 2. 等待服务可用
-            if not map_save_client.wait_for_service(timeout_sec=5.0):
+            # 1. 等待点云保存服务可用（复用 __init__ 中创建的客户端）
+            if not self.map_save_client.wait_for_service(timeout_sec=5.0):
                 logger.error("点云保存服务 /map_save 不可用")
                 return ''
             
             # 3. 创建请求并调用服务
             request = Trigger.Request()
-            future = map_save_client.call_async(request)
+            future = self.map_save_client.call_async(request)
             
             # 4. 等待服务调用结果（添加超时机制防止死循环）
             service_timeout = 60.0  # 服务调用超时时间（秒）
