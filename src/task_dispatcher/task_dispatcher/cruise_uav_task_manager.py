@@ -343,6 +343,11 @@ class CruiseUavTaskManager:
             file_type: 文件类型（如果有）
         """
         try:
+            # 如果task_id包含"buildmap"，直接返回
+            if 'buildmap' in task_id:
+                logger.info(f'task_id包含buildmap，跳过状态上报: taskId={task_id}')
+                return
+            
             # 构建状态上报消息
             status_msg = {
                 'sn': self.robot_sn,  # 这里可以从配置或输入消息中获取
