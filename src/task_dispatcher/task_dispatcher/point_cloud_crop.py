@@ -173,6 +173,6 @@ class PointCloudCrop:
         # 3. 最后微调：去除边界残留的噪点或顶部天空
         # x_ratio=0.02 表示左右各切掉 2%
         # z_ratio=0.35 表示切掉顶部 35% (去天)
-        final = self.auto_crop_pointcloud(cropped, x_ratio=0.02, y_ratio=0.02, z_ratio=0.35)
+        # final = self.auto_crop_pointcloud(cropped, x_ratio=0.02, y_ratio=0.02, z_ratio=0.35)
         
-        return final
+        return cropped
