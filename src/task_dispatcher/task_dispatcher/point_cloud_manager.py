@@ -10,7 +10,6 @@ import os
 import base64
 import requests
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
 from typing import Dict, List, Optional, Any
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import uuid
@@ -400,13 +399,9 @@ class PointCloudManager:
             
             # 4. 使用 SingleThreadedExecutor 避免 "wait set index too big" 错误
             service_timeout = 60.0  # 服务调用超时时间（秒）
-            executor = rclpy.executors.SingleThreadedExecutor()
-            executor.add_node(self.node)
-            result = executor.spin_until_future_complete(future, timeout_sec=service_timeout)
-            executor.remove_node(self.node)
-
-            # 检查是否超时
-            if result != rclpy.executors.FutureState.COMPLETED:
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
+            #检查是否超时
+            if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
                 return '', 0.0, 0.0
             

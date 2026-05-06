@@ -9,7 +9,6 @@ import os
 import base64
 import requests
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
 from typing import Dict, List, Optional, Any
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import uuid
@@ -818,10 +817,7 @@ class CruiseTaskManager:
             
             # 4. 使用专用Executor避免 "wait set index too big" 错误
             service_timeout = 10.0  # 服务调用超时时间（秒）
-            executor = SingleThreadedExecutor()
-            executor.add_node(self.node)
-            executor.spin_until_future_complete(future, timeout_sec=service_timeout)
-            executor.remove_node(self.node)
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
 
             if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")

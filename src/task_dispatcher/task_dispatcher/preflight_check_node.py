@@ -16,7 +16,6 @@
 """
 
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
 import time
 from typing import Optional, Dict, Any
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
@@ -58,18 +57,14 @@ class PreFlightCheckNode():
             
         start_time = time.time()
         
-        executor = SingleThreadedExecutor()
-        executor.add_node(self.node)
         while time.time() - start_time < timeout:
-            executor.spin_once(timeout_sec=0.1)
+            rclpy.spin_once(self.node, timeout_sec=0.1)
             if (
-                self.topic_subscriber.get_vehicle_status() is not None and
-                self.topic_subscriber.get_battery_status() is not None and
+                self.topic_subscriber.get_vehicle_status() is not None and 
+                self.topic_subscriber.get_battery_status() is not None and 
                 self.topic_subscriber.get_failsafe_flags() is not None
             ):
-                executor.remove_node(self.node)
                 return True
-        executor.remove_node(self.node)
                 
         return False
 
@@ -393,4 +388,3 @@ class PreFlightCheckNode():
         except Exception as e:
             logger.error(f'发生错误：{str(e)}')
             return 1, f'发生错误：{str(e)}'
-

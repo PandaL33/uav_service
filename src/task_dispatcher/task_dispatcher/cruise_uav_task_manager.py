@@ -9,7 +9,6 @@ import os
 import base64
 import requests
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
 import asyncio
 import subprocess
 from typing import Dict, List, Optional, Any
@@ -428,6 +427,7 @@ class CruiseUavTaskManager:
             task_id: 任务ID
             task_data: 任务数据
         """
+        starting_algo_ids = []
         try:
             # self._report_task_status(task_id, TaskStatus.STARTED.value, '任务已开始')
             
@@ -474,7 +474,7 @@ class CruiseUavTaskManager:
             else:    
                 cruises = task_data.get('cruises', [])            
                 # 记录启动中的算法
-                starting_algo_ids = []
+                
                 action_idx = 0
                 for cruise in cruises:
                     pos = cruise.get('pos')
@@ -884,21 +884,13 @@ class CruiseUavTaskManager:
             
             # 4. 等待服务调用结果（添加超时机制防止死循环）
             service_timeout = 60.0  # 服务调用超时时间（秒）
-            # rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
             
-            # 检查是否超时
-            # if not future.done():
-            #     logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
-            #     return '', 0.0, 0.0
-            executor = SingleThreadedExecutor()
-            executor.add_node(self.node)
-            result = executor.spin_until_future_complete(future, timeout_sec=service_timeout)
-            executor.remove_node(self.node)
-
-            if result != rclpy.executors.FutureState.COMPLETED:
+            #检查是否超时
+            if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
                 return ''
-            
+                   
             # 5. 检查服务调用结果
             if future.result():
                 if future.result().success:

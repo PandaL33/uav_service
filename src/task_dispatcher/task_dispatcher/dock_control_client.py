@@ -1,5 +1,4 @@
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
 from std_srvs.srv import Trigger
 from std_msgs.msg import String, Int32
 import json
@@ -131,17 +130,18 @@ class DockControlClient:
         request = Trigger.Request()
         future = client.call_async(request)
         
-        # 等待结果（使用专用Executor避免 "wait set index too big" 错误）
-        executor = SingleThreadedExecutor()
-        executor.add_node(self.node)
-        executorresult = executor.spin_until_future_complete(future, timeout_sec=timeout_sec)
-        executor.remove_node(self.node)
-
-        if executorresult != rclpy.executors.FutureState.COMPLETED:
-            msg = f"服务 {service_name} 超时 ({timeout_sec}s)"
-            logger.error(msg)
-            return False, msg
-
+        # 等待结果
+        start_time = time.time()
+        while not future.done():
+            elapsed = time.time() - start_time
+            if elapsed > timeout_sec:
+                msg = f"服务 {service_name} 超时 ({timeout_sec}s)"
+                logger.error(msg)
+                return False, msg
+            
+            # 让出控制权，处理回调
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+        
         # 获取结果
         try:
             result = future.result()
@@ -166,35 +166,28 @@ class DockControlClient:
         logger.info(f"等待{operation_type}操作完成...")
         start_time = time.time()
         
-        executor = SingleThreadedExecutor()
-        executor.add_node(self.node)
         while rclpy.ok():
             elapsed = time.time() - start_time
             if elapsed > timeout:
                 msg = f"等待{operation_type}操作超时"
                 logger.error(msg)
-                executor.remove_node(self.node)
                 return False, msg
-
+            
             # 检查进度
             if operation_type == 'cover':
                 if self.cover_status == 'ok' and self.cover_progress == 100:
                     logger.info(f"{operation_type}操作完成")
-                    executor.remove_node(self.node)
                     return True, f"{operation_type}操作完成"
             elif operation_type == 'putter':
                 if self.putter_status == 'ok' and self.putter_progress == 100:
                     logger.info(f"{operation_type}操作完成")
-                    executor.remove_node(self.node)
                     return True, f"{operation_type}操作完成"
             elif operation_type == 'charge':
                 if self.charge_status == 'ok' and self.charge_progress == 100:
                     logger.info(f"{operation_type}操作完成")
-                    executor.remove_node(self.node)
-                    return True, f"{operation_type}操作完成"
-            # 短暂等待，使用专用executor避免 "wait set index too big"
-            executor.spin_once(timeout_sec=0.2)
-        executor.remove_node(self.node)
+                    return True, f"{operation_type}操作完成"  
+            # 短暂等待
+            rclpy.spin_once(self.node, timeout_sec=0.2)
         
         return False, "节点关闭"
 
@@ -239,8 +232,7 @@ class DockControlClient:
         logger.info("步骤 5: 等待推杆展开完成")
         success, msg = self.wait_for_operation('putter')
         if not success:
-            return False, f"推杆展开未到位: {msg}"
-            
+            return False, f"推杆展开未到位: {msg}" 
         alarm_msg = Int32() 
         alarm_msg.data = 3
         self.dock_alarm_pub.publish(alarm_msg)
@@ -280,15 +272,15 @@ class DockControlClient:
             return False, f"舱盖关闭未到位: {msg}"
         
         # 5. 打开充电
-        # logger.info("步骤 5: 打开充电")
-        # success, msg = self.call_service(self.charge_open_client, 'charge_open')
-        # if not success:
-        #     return False, f"打开充电失败: {msg}"
+        logger.info("步骤 5: 打开充电")
+        success, msg = self.call_service(self.charge_open_client, 'charge_open')
+        if not success:
+            return False, f"打开充电失败: {msg}"
         
-        # logger.info("步骤 6: 等待充电打开")
-        # success, msg = self.wait_for_operation('charge')
-        # if not success:
-        #     return False, f"打开充电未到位: {msg}"
+        logger.info("步骤 6: 等待充电打开")
+        success, msg = self.wait_for_operation('charge')
+        if not success:
+            return False, f"打开充电未到位: {msg}"
             
         logger.info(">>> 降落序列完成！")
         return True, "降落序列执行成功"
@@ -363,4 +355,4 @@ class DockControlClient:
                 return False, f"关闭充电失败: {msg}"    
             
         return True, f"操作{act_name}成功"
-           
+        

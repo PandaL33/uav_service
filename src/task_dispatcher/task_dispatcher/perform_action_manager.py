@@ -261,6 +261,7 @@ class PerformActionManager:
                      # 执行成功
                     if to_target == True:
                         logger.info(f'飞行动作执行成功,  当前坐标点: {self.topic_subscriber.get_position()}')
+                        time.sleep(1.0)
                         return {
                             'success': True,
                             'message': f'飞行动作执行成功: 目标坐标点(x={x}, y={y}, z={z}, d={d})'
