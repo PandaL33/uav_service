@@ -72,9 +72,11 @@ class UavActionManager:
         
     def exec_land_command(self):
         """处理降落状态"""
+        time.sleep(2)
         self.current_state = 'LANDING'
         while self.current_state == 'LANDING':
-            self.perform_action_walk_to_origin_pos()
+            if not self.is_landed:
+                self.perform_action_walk_to_origin_pos()
             
             current_time = time.time()
             if current_time - self.last_log_time >= self.log_interval:
@@ -98,23 +100,23 @@ class UavActionManager:
                     if arming_state == VehicleStatus.ARMING_STATE_DISARMED:
                         logger.info('无人机已上锁，任务完成')
                         # 切换到定点飞行模式（Position 模式）
+                        time.sleep(2)
                         self.engage_position_mode()
                         self.current_state = 'IDLE'
-                        
+                        self.is_landed = False
                         return            
                     else:
                         # 持续发送上锁命令直到成功
-                        logger.info('无人机发送Land命令')
+                        #logger.info('无人机发送Land命令')
+                        current_time = time.time()
+                        if current_time - self.last_log_time >= self.log_interval:
+                            robot_pos = self.topic_subscriber.get_position()
+                            logger.info(f'执行降落和上锁命令，当前点位置: ({robot_pos})')
+                            self.last_log_time = current_time  # 更新上次打印时间
                         self.land()
                         self.disarm()
-                    time.sleep(0.5)
-                
-                # timeout_count += 1
-                # if timeout_count > 240: # 超时 2分钟 (240 * 0.5s)
-                #     logger.error("强制超时退出")
-                #     self.current_state = 'IDLE'
-                #     break
-                
+                    time.sleep(0.2) 
+                          
             time.sleep(0.5)
             
     def land(self):
@@ -188,6 +190,12 @@ class UavActionManager:
             # 6. 判断结果
             if distance < 0.2 and rz < 0.2:
                 return True
+            
+            circle_radius = math.sqrt(dx**2 + dy**2)
+            if distance is not None and distance < 0.3 and circle_radius < 0.2: 
+                logger.info(f"距离小于0.3米 (距离: {distance:.2f})，发送Land命令")
+                self.land()
+                self.is_landed = True
                 
             return False
 
