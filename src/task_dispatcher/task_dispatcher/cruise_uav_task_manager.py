@@ -584,6 +584,7 @@ class CruiseUavTaskManager:
                             msg = f"雨量过大，禁止起飞. 雨量:{rainfall}"
                             logger.warning(msg)
                             self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
+                            self.reset_status()
                             return
                         
                         wind_speed = device_data.get('wind_speed', 0.0)
@@ -591,11 +592,13 @@ class CruiseUavTaskManager:
                             msg = f"风速过大，禁止起飞. 风速:{wind_speed}"
                             logger.warning(msg)
                             self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
+                            self.reset_status()
                             return
                         
                         dock_status, dock_msg = self.dock_control_client.takeoff_sequence()
                         if not dock_status:
                             self._report_task_status(task_id, TaskStatus.ABORTED.value, dock_msg)
+                            self.reset_status()
                             return
 
                     except Exception as e:
@@ -611,6 +614,7 @@ class CruiseUavTaskManager:
                     if check_code == 1:
                         logger.warning(msg)
                         self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
+                        self.reset_status()
                         return
                     
                 # 检查地图是否存在，如果不存在则进行更新

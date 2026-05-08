@@ -44,7 +44,7 @@ class UavActionManager:
         self.goal_pose_pub_3d = self.node.create_publisher(PoseStamped, "/goal_pose_3d", 10)
         
         self.last_log_time = time.time() 
-        self.log_interval = 10.0  # 设置间隔为 10 秒
+        self.log_interval = 5.0  # 设置间隔为 5 秒
         
         logger.info('执行动作管理器初始化完成')
     def publish_vehicle_command(self, command, param1=0.0, param2=0.0, param7=0.0):
@@ -109,7 +109,7 @@ class UavActionManager:
                         # 持续发送上锁命令直到成功
                         #logger.info('无人机发送Land命令')
                         current_time = time.time()
-                        if current_time - self.last_log_time >= self.log_interval:
+                        if current_time - self.last_log_time >= 1.0:
                             robot_pos = self.topic_subscriber.get_position()
                             logger.info(f'执行降落和上锁命令，当前点位置: ({robot_pos})')
                             self.last_log_time = current_time  # 更新上次打印时间
