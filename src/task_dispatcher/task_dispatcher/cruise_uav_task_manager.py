@@ -346,7 +346,7 @@ class CruiseUavTaskManager:
         """
         try:
             # 如果task_id包含"buildmap"，直接返回
-            if 'buildmap' in task_id:
+            if 'buildmap' in str(task_id):
                 logger.info(f'task_id包含buildmap，跳过状态上报: taskId={task_id}')
                 return
             
