@@ -31,6 +31,7 @@ from dock_control_client import DockControlClient
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
 from task_dispatcher.uav_action_manager import UavActionManager
 from auth_utils import AuthManager 
+from cloud_compare_icp import CloudCompareIcp
 
 # 配置日志
 logger = logging.getLogger('task_dispatcher.cruise_uav_task_manager')
@@ -99,6 +100,8 @@ class CruiseUavTaskManager:
                 )
         
         self.uav_action_manager = UavActionManager(node, topic_subscriber=self.ros_topic_subscriber)
+        
+        self.cloud_compare_icp = CloudCompareIcp()
         
         # 存储巡检任务的字典，key为taskId
         self.tasks: Dict[str, Dict] = {}
@@ -521,6 +524,8 @@ class CruiseUavTaskManager:
                     logger.info(f"执行巡检任务task_id={task_id}, 完成【第{cruise_idx}段巡检】")
                 
                 # 发送降落指令
+                if ENABLE_DOCK_CONTROL:
+                    self.dock_control_client.land_alarm()
                 # self.uav_command_sender.send_command('LAND')                                               
                 self.uav_action_manager.exec_land_command()
             
@@ -915,10 +920,15 @@ class CruiseUavTaskManager:
             if not os.path.exists(pcd_file_path):
                 logger.error(f"点云文件不存在: {pcd_file_path}")
                 return ''
-
+            
+            logger.info(f"点云文件配准")
+            icp_pcd_file_path = "/home/cat/slam_data/pcd/test_icp.pcd"
+            self.cloud_compare_icp.run_registrator(PCD_FILE_PATH, '/home/cat/slam_data/3d_map/3dmap.pcd', icp_pcd_file_path)
+            logger.info(f"点云文件配准完成 {icp_pcd_file_path}")
+            
             # 持久化点云文件和记录
             task_id = self.current_task_id if hasattr(self, 'current_task_id') and self.current_task_id else 'unknown_task'
-            success, record = self.point_cloud_persistor.persist_point_cloud(pcd_file_path, task_id)
+            success, record = self.point_cloud_persistor.persist_point_cloud(icp_pcd_file_path, task_id)
             if success and record.get('id'):
                 logger.info(f"点云文件已持久化，记录ID: {record['id']}")
                 # 立即更新记录状态为上传中，避免定时器重复处理
@@ -928,7 +938,7 @@ class CruiseUavTaskManager:
                 logger.error(f"点云文件持久化失败")
             
             # 7. 上传点云文件到文件服务器（带重试机制）
-            file_id = self.upload_point_cloud_with_retry(pcd_file_path)
+            file_id = self.upload_point_cloud_with_retry(icp_pcd_file_path)
             if file_id:
                 logger.info(f"点云文件上传成功，文件ID: {file_id}")
                 # 更新记录状态为已上传
