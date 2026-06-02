@@ -574,6 +574,8 @@ class CruiseUavTaskManager:
             elif ROBOT_TYPE == "uav":
                 logger.info(f"开始执行无人机巡检任务task_id={task_id}")
                 self._report_task_status(task_id, TaskStatus.STARTED.value, '任务已开始')
+                #切换为位置模式
+                self.uav_action_manager.engage_position_mode()
                 
                 if ENABLE_DOCK_CONTROL:
                     # 这里进行无人机起飞前检查
