@@ -24,13 +24,14 @@ from enum import Enum
 from std_srvs.srv import Trigger
 from rclpy.client import Client
 from requests.auth import HTTPBasicAuth
-from .config import ROBOT_TYPE, PCD_FILE_PATH, ENABLE_MANUAL_CONTROL
+from .config import ROBOT_TYPE, PCD_FILE_PATH, ENABLE_MANUAL_CONTROL, AUTH_CONFIG
 from .config import ENABLE_PREFLIGHT_CHECK, ENABLE_DOCK_CONTROL, WIND_SPEED_THRESHOLD, RAINFALL_THRESHOLD  # 引入配置文件中的URL和点云文件路径
 from uav_command_sender import UavCommandSender
 from dock_control_client import DockControlClient
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
 from task_dispatcher.uav_action_manager import UavActionManager
-from auth_utils import AuthManager 
+from auth_utils import AuthManager
+from task_dispatcher.pcd_chunk_upload import FileChunkUploader
 
 # 配置日志
 logger = logging.getLogger('task_dispatcher.cruise_uav_task_manager')
@@ -78,8 +79,14 @@ class CruiseUavTaskManager:
         self.map_manager: MapManager = map_manager
         self.server_url = server_url
         self.auth_manager = AuthManager(server_url)
-        
-        
+
+        # 分片上传器（用于大文件如点云的分片上传）
+        self.file_chunk_uploader = FileChunkUploader(
+            base_url=server_url,
+            service_user=AUTH_CONFIG['USERNAME'],
+            service_password=AUTH_CONFIG['PASSWORD'],
+        )
+
         # 点云持久化管理器
         self.point_cloud_persistor = PointCloudPersistor(node, server_url)
         # 设置上传回调函数
@@ -1034,6 +1041,35 @@ class CruiseUavTaskManager:
             logger.error(f'点云上传异常: {str(e)}')
             return ''
     
+    def upload_point_cloud_chunk_to_file_server(self, pcd_file_path, is_retry=False, task_id=None):
+        """
+        使用分片上传方式上传点云文件到文件服务器
+
+        Args:
+            pcd_file_path: 点云文件路径
+            is_retry: 是否为重试上传，默认False
+            task_id: 任务ID，用于重试上传时报告任务状态
+
+        Returns:
+            str: 文件ID，失败返回空字符串
+        """
+        try:
+            logger.info(f'准备使用分片上传点云到文件服务器: 文件路径={pcd_file_path}')
+            file_id = self.file_chunk_uploader.upload_file(pcd_file_path)
+
+            if file_id:
+                if is_retry:
+                    logger.info(f'重试上传点云成功，文件ID: {file_id}')
+                    self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
+                return file_id
+            else:
+                logger.error('点云分片上传失败，未获取到文件ID')
+                return ''
+
+        except Exception as e:
+            logger.error(f'点云分片上传异常: {str(e)}')
+            return ''
+    
     def upload_point_cloud_with_retry(self, pcd_file_path):
         """
         带重试机制的点云文件上传函数
@@ -1066,7 +1102,7 @@ class CruiseUavTaskManager:
                 continue
             
             # 尝试上传点云文件
-            file_id = self.upload_point_cloud_to_file_server(pcd_file_path)
+            file_id = self.upload_point_cloud_chunk_to_file_server(pcd_file_path)
             if file_id:
                 return file_id
             
