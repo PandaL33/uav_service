@@ -156,8 +156,7 @@ class DockControlClient:
             msg = f"{service_name} 异常: {str(e)}"
             logger.error(msg)
             return False, msg
-        
-    
+          
     def wait_for_operation(self, operation_type: str, timeout: float = 60.0):
         """
         等待操作完成
@@ -233,8 +232,9 @@ class DockControlClient:
         success, msg = self.wait_for_operation('putter')
         if not success:
             return False, f"推杆展开未到位: {msg}" 
+        
         alarm_msg = Int32() 
-        alarm_msg.data = 3
+        alarm_msg.data = 3 #无人机起飞告警
         self.dock_alarm_pub.publish(alarm_msg)
 
         logger.info(">>> 起飞序列完成！")
@@ -287,9 +287,41 @@ class DockControlClient:
 
     def land_alarm(self): 
         alarm_msg = Int32() 
-        alarm_msg.data = 4
+        alarm_msg.data = 4 #无人机返航告警
         self.dock_alarm_pub.publish(alarm_msg)
-
+        
+    def land_charge_sequence(self) -> tuple[bool, str]:
+        """
+        执行降落后充电
+        返回: (bool: 是否成功, str: 状态消息)
+        """
+        # 1. 闭合推杆
+        logger.info("步骤 1: 闭合推杆")
+        success, msg = self.call_service(self.putter_close_client, 'putter_close')
+        if not success:
+            return False, f"闭合推杆失败: {msg}"
+        
+        # 2. 等待推杆闭合完成
+        logger.info("步骤 2: 等待推杆闭合完成")
+        success, msg = self.wait_for_operation('putter')
+        if not success:
+            return False, f"推杆闭合未到位: {msg}"
+        
+        # 3. 打开充电
+        logger.info("步骤 3: 打开充电")
+        success, msg = self.call_service(self.charge_open_client, 'charge_open')
+        if not success:
+            return False, f"打开充电失败: {msg}"
+        
+        # 4. 等待充电打开
+        logger.info("步骤 4: 等待充电打开")
+        success, msg = self.wait_for_operation('charge')
+        if not success:
+            return False, f"打开充电未到位: {msg}"
+            
+        logger.info(">>> 降落充电完成！")
+        return True, "降落充电执行成功"
+    
     def call_uav_hangar_control_service(self, act_name):
         logger.info(f"收到{act_name}指令")
         
