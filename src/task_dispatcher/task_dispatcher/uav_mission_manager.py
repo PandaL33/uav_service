@@ -88,6 +88,8 @@ class UavMissionManager():
         # 初始位置和目标位置
         self.initial_x = None
         self.initial_y = None
+        self.land_x = None
+        self.land_y = None
         self.target_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
         
         # 状态管理
@@ -405,8 +407,8 @@ class UavMissionManager():
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.node.get_clock().now().to_msg()
         pose_msg.header.frame_id = "map"
-        pose_msg.pose.position.x = 0.0
-        pose_msg.pose.position.y = 0.0
+        pose_msg.pose.position.x = self.land_x
+        pose_msg.pose.position.y = self.land_y
         pose_msg.pose.position.z = 0.0
         # 0 角度直接写死
         pose_msg.pose.orientation.x = 0.0
@@ -421,18 +423,22 @@ class UavMissionManager():
     def handle_landing_state(self):
         
         """处理降落状态"""
-        self.perform_action_walk_to_origin_pos()
+        if self.land_x is None or self.land_y is None:
+            self.land_x = self.vehicle_local_position.x
+            self.land_y = self.vehicle_local_position.y
+            logger.info(f'记录降落位置: X={self.land_x:.2f}, Y={self.land_y:.2f}')
+        # self.perform_action_walk_to_origin_pos()
         
         current_time = time.time()
         if current_time - self.last_log_time >= self.log_interval:
             robot_pos = self.topic_subscriber.get_position()
             logger.info(f'执行降落任务，当前点位置: ({robot_pos})')
             self.last_log_time = current_time  # 更新上次打印时间
-                
+      
         # 检查是否已降落到地面
         # 定义原点
-        origin = type('obj', (), {'x': 0.0, 'y': 0.0, 'z': 0.0})
-        # 判断是否到达原点
+        origin = type('obj', (), {'x': self.land_x, 'y': self.land_y, 'z': 0.0})
+        # 判断是否到达降落点
         arrived = self._uav_is_flying_to_point(origin)
         if arrived:
             logger.info('已着陆')
