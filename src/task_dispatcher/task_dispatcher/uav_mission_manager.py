@@ -227,7 +227,7 @@ class UavMissionManager():
                 self.last_log_time = current_time  # 更新上次打印时间
         else:
             # 发布offboard控制模式信号 - 必须持续发送
-            #self.publish_offboard_control_heartbeat_signal()
+            self.publish_offboard_control_heartbeat_signal()
 
             # 根据当前状态发布轨迹设定点
             if self.current_state == 'ARMING':
@@ -428,13 +428,16 @@ class UavMissionManager():
             self.land_y = self.vehicle_local_position.y
             logger.info(f'记录降落位置: X={self.land_x:.2f}, Y={self.land_y:.2f}')
         # self.perform_action_walk_to_origin_pos()
-        
+
+        # 发布下降设定点：保持当前 xy，z 降到 0（NED 坐标系下 z=0 为地面）
+        self.publish_setpoint(x=self.land_x, y=self.land_y, z=0.0)
+
         current_time = time.time()
         if current_time - self.last_log_time >= self.log_interval:
             robot_pos = self.topic_subscriber.get_position()
             logger.info(f'执行降落任务，当前点位置: ({robot_pos})')
             self.last_log_time = current_time  # 更新上次打印时间
-      
+
         # 检查是否已降落到地面
         # 定义原点
         origin = type('obj', (), {'x': self.land_x, 'y': self.land_y, 'z': 0.0})
@@ -443,6 +446,9 @@ class UavMissionManager():
         if arrived:
             logger.info('已着陆')
             self.current_state = 'DISARMING'
+            # 重置降落点，供下次任务使用
+            self.land_x = None
+            self.land_y = None
                 
     def handle_disarming_state(self):
         """处理上锁状态"""
