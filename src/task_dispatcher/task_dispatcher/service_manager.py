@@ -32,10 +32,10 @@ if ROBOT_TYPE == "uav":
     SERVICE_CONFIG = {
         'cam_control': '云台控制服务',
         'microxrce-agent': '飞控服务',
-        'fast_lio': '点云服务',
+        # 'fast_lio': '点云服务',
         'task_dispatcher': '调度服务',
-        'lio_sam_nav2': '导航服务',
-        'auto_buildmap': '建图服务'
+        'ego_planner': '导航服务',
+        'build_map_drone': '建图服务'
     }
 else:
     # 服务映射配置
