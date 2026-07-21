@@ -224,7 +224,9 @@ class FileChunkUploader:
         :param file_path: 本地文件路径
         :return: fileId
         """
-        file_name = os.path.basename(file_path)
+        # file_name = os.path.basename(file_path)
+        timestamp = int(time.time() * 1000)
+        file_name = f'point_cloud_{timestamp}.pcd'
         total_size = os.path.getsize(file_path)
         chunk_size = self.chunk_size
 

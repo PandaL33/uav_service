@@ -547,7 +547,13 @@ class CruiseUavTaskManager:
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
             
             time.sleep(1)
-            
+            if ENABLE_DOCK_CONTROL:
+                # 任务完成
+                try:
+                    self.dock_control_client.land_charge_sequence()    
+                except Exception as e:
+                    logger.error(f'降落序列执行异常: {str(e)}')
+                        
             logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
             self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
             

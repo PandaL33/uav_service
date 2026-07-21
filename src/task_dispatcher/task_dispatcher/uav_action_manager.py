@@ -113,7 +113,7 @@ class UavActionManager:
                             robot_pos = self.topic_subscriber.get_position()
                             logger.info(f'执行降落和上锁命令，当前点位置: ({robot_pos})')
                             self.last_log_time = current_time  # 更新上次打印时间
-                        self.land()
+                        # self.land()
                         self.disarm()
                     time.sleep(0.2) 
                           
@@ -194,7 +194,7 @@ class UavActionManager:
             circle_radius = math.sqrt(dx**2 + dy**2)
             if distance is not None and distance < 0.3 and circle_radius < 0.2: 
                 logger.info(f"距离小于0.3米 (距离: {distance:.2f})，发送Land命令")
-                self.land()
+                # self.land()
                 self.is_landed = True
                 
             return False
