@@ -239,6 +239,11 @@ class DeviceStatusReport:
             robot_state: 最新的机器人状态
         """
         try:
+            current_time = time.time()
+            time_since_last = current_time - self._last_report_time
+            if time_since_last < self.min_interval:
+                return
+            
             # 创建状态报告
             current_status = self._create_device_status_report(robot_state)
             body = current_status['body']
@@ -352,39 +357,34 @@ class DeviceStatusReport:
             current_status = self._create_device_fault_status_report(device_fault_state)
             body = current_status['body']
             
-            # 检查故障状态是否变化
             with self._lock:
                 # 检查故障状态是否变化
-                # status_changed = self._is_status_changed(body, self._last_fault_status)
-                status_changed = True
-                logger.debug(f"故障状态是否变化: {status_changed}")
-                should_report = self._should_report(status_changed, self._last_fault_report_time)
+                if time.time() - self._last_report_time < self.min_interval:
+                    return
+
+                # 序列化故障状态报告
+                report_json = json.dumps(current_status)
                 
-                # 如果需要上报，则推送MQTT消息
-                if should_report:
-                    # 序列化故障状态报告
-                    report_json = json.dumps(current_status)
-                    
-                    # 将消息添加到缓存
-                    message_cache_manager.add_message(str(current_status['seq']), current_status)
-                    logger.info(f'已将故障状态报告消息加入缓存: seq={current_status["seq"]}')
-                    
-                    # 发布到MQTT
-                    result = self.mqtt_client.publish(
-                        topic=self.mqtt_response_topic,
-                        payload=report_json,
-                        qos=1,
-                        retain=False
-                    )
-                    
-                    # 更新最后上报时间和故障状态
-                    self._last_fault_report_time = time.time()
-                    self._last_fault_status = body.copy()
-                    
-                    if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                        logger.info(f'Fault status report published: seq={current_status["seq"]}')
-                    else:
-                        logger.error(f'Failed to publish fault status report: {result.rc}')
+                # 将消息添加到缓存
+                message_cache_manager.add_message(str(current_status['seq']), current_status)
+                logger.info(f'已将故障状态报告消息加入缓存: seq={current_status["seq"]}')
+                
+                # 发布到MQTT
+                result = self.mqtt_client.publish(
+                    topic=self.mqtt_response_topic,
+                    payload=report_json,
+                    qos=1,
+                    retain=False
+                )
+                
+                # 更新最后上报时间和故障状态
+                self._last_fault_report_time = time.time()
+                self._last_fault_status = body.copy()
+                
+                if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                    logger.info(f'Fault status report published: seq={current_status["seq"]}')
+                else:
+                    logger.error(f'Failed to publish fault status report: {result.rc}')
                 
         except Exception as e:
             logger.error(f'Error in fault status update: {e}')

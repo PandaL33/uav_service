@@ -11,14 +11,17 @@ from typing import Dict, Any, Optional
 class MessageCacheManager:
     """消息缓存管理器类"""
     
-    def __init__(self, cache_time_seconds: int = 10):
+    def __init__(self, cache_time_seconds: int = 10, clean_interval: float = 5.0):
         """
         初始化消息缓存管理器
         
         Args:
             cache_time_seconds: 缓存时间（秒），默认10秒
+            clean_interval: 清理检查间隔（秒），默认5秒
         """
         self.cache_time_seconds = cache_time_seconds
+        self._clean_interval = clean_interval
+        self._last_clean_time = 0.0
         # 缓存结构: {seq: {"message": 原始消息, "timestamp": 缓存时间戳}}
         self._cache: Dict[str, Dict[str, Any]] = {}
     
@@ -35,7 +38,7 @@ class MessageCacheManager:
             "timestamp": time.time()
         }
         # 清理过期缓存
-        self._clean_expired_cache()
+        self._maybe_clean_expired_cache()
     
     def get_message_by_seq(self, seq: str) -> Optional[Dict[str, Any]]:
         """
@@ -47,14 +50,27 @@ class MessageCacheManager:
         Returns:
             缓存的消息字典，如果不存在或已过期则返回None
         """
-        # 先清理过期缓存
-        self._clean_expired_cache()
         
         # 查找消息
         if seq in self._cache:
-            return self._cache[seq]["message"]
+            cached_data = self._cache[seq]
+            # 检查该条消息是否过期
+            if time.time() - cached_data["timestamp"] <= self.cache_time_seconds:
+                return cached_data["message"]
+            else:
+                del self._cache[seq]
         return None
     
+    def _maybe_clean_expired_cache(self) -> None:
+        """
+        按间隔清理过期缓存，避免高频调用时每次都遍历
+        """
+        current_time = time.time()
+        if current_time - self._last_clean_time < self._clean_interval:
+            return
+        self._last_clean_time = current_time
+        self._clean_expired_cache()
+
     def _clean_expired_cache(self) -> None:
         """
         清理过期的缓存消息
@@ -78,7 +94,7 @@ class MessageCacheManager:
         Returns:
             缓存的消息数量
         """
-        self._clean_expired_cache()
+        self._maybe_clean_expired_cache()
         return len(self._cache)
 
 

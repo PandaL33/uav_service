@@ -243,6 +243,8 @@ class TaskDispatcherNode(Node):
             try:
                 if not self.mqtt_connected:
                     logger.info(f'连接到MQTT代理: {self.mqtt_broker}:{self.mqtt_port}')
+                    #重连前先停止旧的网络循环线程，避免线程泄漏导致CPU空转
+                    self.mqtt_client.loop_stop()
                     self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
                     self.mqtt_client.loop_start()
                     self.mqtt_connected = True
@@ -250,6 +252,10 @@ class TaskDispatcherNode(Node):
             except Exception as e:
                 logger.error(f'MQTT连接错误: {str(e)}')
                 self.mqtt_connected = False
+                try:
+                    self.mqtt_client.loop_stop()
+                except Exception:
+                    pass
                 time.sleep(5)  # 重连前等待5秒
     
     def on_mqtt_connect(self, client, userdata, flags, rc):
