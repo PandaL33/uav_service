@@ -1,0 +1,14 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+install/
+log/
+
+# 离线仿真依赖环境（由 scripts/setup_offline_sim_env.sh 生成，勿提交）
+.venv/
+
+# 运行期产物
+uav_service/src/task_dispatcher/task_dispatcher/persisted_point_clouds/*.pcd
+src/task_dispatcher/task_dispatcher/persisted_point_clouds/*.pcd

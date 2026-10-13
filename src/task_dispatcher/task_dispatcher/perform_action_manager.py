@@ -11,6 +11,7 @@ import time
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import math
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import String
 import tf_transformations
 from action_msgs.msg import GoalStatusArray, GoalStatus
 from task_dispatcher.ptz_control import PtzControl
@@ -45,6 +46,17 @@ class PerformActionManager:
 
         self.goal_pose_pub = self.node.create_publisher(PoseStamped, "/goal_pose", 10)
         self.goal_pose_pub_3d = self.node.create_publisher(PoseStamped, "/goal_pose_3d", 10)
+
+        # 失效降级互通：发布 /mission_event（String+JSON，复用方案 §14 事件集与字段）
+        self.mission_event_pub = self.node.create_publisher(String, "/mission_event", 10)
+
+        # 航点停滞判定参数（不简化，实际环境日飞，判据可配置）
+        #   stall_time_s    : 连续无有效推进的秒数阈值，触发一次停滞判定
+        #   stall_dist_min  : 单次判定期内必须至少推进的水平距离(m)，否则视为停滞
+        #   stall_progress  : 停滞判定期的采样间隔(s)
+        self.waypoint_stall_time_s = 5.0          # 5s 无推进 → 判定不可达
+        self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
+        self.waypoint_min_progress = 0.15         # 2s 内须推进 >= 0.15m，否则停滞计数+1
 
         # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
         self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
@@ -160,6 +172,39 @@ class PerformActionManager:
             # 捕获所有未预料的异常，防止节点崩溃
             logger.exception(f"判断飞行状态时发生未知错误: {e}")
             return False
+
+    def _publish_mission_event(self, event: str, **fields):
+        """
+        发布 /mission_event（String+JSON）。事件名与字段按完整失效降级方案 §14 对齐：
+        复用既有事件集与必带字段 flight_epoch/goal_seq，仅在 JSON 内扩展可选字段。
+
+        事件集（方案 §14）：GOAL_UNREACHABLE / GOAL_SUBSTITUTED / RETURN_INIT /
+        RETURNED_LANDED / RETURN_BLOCKED / LIO_RED / ...
+        必带字段：flight_epoch / goal_seq（维护于调用方；无则传 'NA'）
+        可选字段（本次新增语义）：count / consecutive_goals / next / reason
+        """
+        try:
+            payload = {"event": event}
+            payload.update(fields)
+            msg = String()
+            msg.data = json.dumps(payload, ensure_ascii=False)
+            self.mission_event_pub.publish(msg)
+            logger.info(f"[mission_event] {msg.data}")
+        except Exception as e:
+            logger.warning(f"发布 mission_event 失败: {e}")
+
+    def _get_current_target_dist(self, tx: float, ty: float, tz: float) -> Optional[float]:
+        """返回当前无人机到目标点的水平距离；取不到位置返回 None"""
+        try:
+            robot_pos = self.topic_subscriber.get_position()
+            if not robot_pos:
+                return None
+            rx = float(robot_pos.get('x', 0.0))
+            ry = float(robot_pos.get('y', 0.0))
+            return math.hypot(rx - tx, ry - ty)
+        except Exception:
+            return None
+
     def perform_action_walk_to_origin_pos(self):
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.node.get_clock().now().to_msg()
@@ -250,27 +295,63 @@ class PerformActionManager:
                 pose_msg.pose.orientation.w = float(w)
                 logger.info(f"publish goal_pose_3d: {pose_msg} angle={math.degrees(yaw):.2f}")
 
-                # 2.等待是否到达目标点
+                # 2.等待是否到达目标点（含停滞 watchdog，避免 0918「悬停至耗尽电量」）
+                # 停滞判据：每 waypoint_progress_window 秒评估一次水平推进；
+                #   连续 waypoint_stall_time_s 秒无有效推进 → 判定本航点不可达（REACH_FAIL）。
+                # 返回码语义：success=False 且 message 前缀 GOAL_UNREACHABLE 表示「停滞不可达」，
+                #   由编排层(cruise)累计连续失败并决定 跳点/返航/迫降。
+                st_stall_accum = 0.0          # 累计停滞秒数
+                st_last_dist = self._get_current_target_dist(x, y, z)
+                st_last_sample_t = time.time()
                 while True:
                     self.goal_pose_pub_3d.publish(pose_msg)
-                    
+
                     if self.stop_action:
                         logger.info(f'收到停止指令，飞行动作提前结束, 当前坐标点: {self.topic_subscriber.get_position()}')
                         return {
                             'success': False,
                             'message': '收到停止指令，飞行动作提前结束'
                         }
+
                     to_target = self._uav_is_flying_to_point(pose_msg.pose.position)
-                     # 执行成功
-                    if to_target == True:
-                        logger.info(f'飞行动作执行成功,  当前坐标点: {self.topic_subscriber.get_position()}')
+                    if to_target:
+                        logger.info(f'飞行动作执行成功, 当前坐标点: {self.topic_subscriber.get_position()}')
                         time.sleep(1.0)
                         return {
                             'success': True,
                             'message': f'飞行动作执行成功: 目标坐标点(x={x}, y={y}, z={z}, d={d})'
                         }
-                        
-                    logger.info(f'无人机飞行中, 当前坐标点: {self.topic_subscriber.get_position()}')
+
+                    # ---- 停滞 watchdog ----
+                    now_t = time.time()
+                    if st_last_sample_t is not None and now_t - st_last_sample_t >= self.waypoint_progress_window:
+                        cur_dist = self._get_current_target_dist(x, y, z)
+                        if cur_dist is None or st_last_dist is None:
+                            pass  # 位置暂不可得，本轮不判定，保持采样
+                        else:
+                            progressed = st_last_dist - cur_dist   # >0 表示在靠近
+                            if progressed < self.waypoint_min_progress:
+                                st_stall_accum += self.waypoint_progress_window
+                                if st_stall_accum >= self.waypoint_stall_time_s:
+                                    logger.error(f'航点停滞 {st_stall_accum:.1f}s 无有效推进，判定不可达: '
+                                                 f'目标(x={x}, y={y}, z={z})')
+                                    # topic 互通：向编排层/外部广播不可达（字段按方案 §14，goal_seq/flight_epoch 由编排层累计）
+                                    self._publish_mission_event(
+                                        'GOAL_UNREACHABLE',
+                                        reason='STALLED',
+                                        goal_seq='NA',
+                                        flight_epoch='NA',
+                                        target=(f'{x:.2f},{y:.2f},{z:.2f}'))
+                                    return {
+                                        'success': False,
+                                        'message': f'GOAL_UNREACHABLE: 航点停滞不可达 (x={x}, y={y}, z={z})'
+                                    }
+                            else:
+                                st_stall_accum = 0.0   # 有效推进，停滞累计清零
+                            st_last_dist = cur_dist
+                        st_last_sample_t = now_t
+
+                    logger.debug(f'无人机飞行中, 当前坐标点: {self.topic_subscriber.get_position()}')
                     time.sleep(0.2)
         except Exception as e:
             logger.error(f'执行飞行动作失败: {str(e)}')

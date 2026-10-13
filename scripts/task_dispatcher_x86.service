@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/cat/uav_service
+WorkingDirectory=/home/cat/uav_service/
 
 Environment="ROS_DOMAIN_ID=0"
 Environment="ROS_LOCALHOST_ONLY=0"

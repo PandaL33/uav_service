@@ -8,7 +8,8 @@ CODEC = "h265"
 
 # 视频RTSP地址
 CAMERAID = "camera01"
-CAMERA01_URL = "rtsp://192.168.144.108:554/stream=0"
+#CAMERA01_URL = "rtsp://192.168.144.108:554/stream=0"
+CAMERA01_URL = "rtsp://192.168.144.25:8554/main.264"
 CAMERA02_URL = "" #"rtsp://admin:Lyq%402025@192.168.168.153:554/Streaming/Channels/101"
 
 # 云台控制接口地址

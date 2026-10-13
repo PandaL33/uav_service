@@ -11,6 +11,7 @@ import requests
 import rclpy
 import asyncio
 import subprocess
+from std_msgs.msg import String
 from typing import Dict, List, Optional, Any
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import uuid
@@ -132,9 +133,154 @@ class CruiseUavTaskManager:
             'mid': 0.5,
             'high': 0.8
         }
-        
+
+        # 失效降级互通：发布 /mission_event（String+JSON，复用方案 §14）
+        self.mission_event_pub = self.node.create_publisher(String, "/mission_event", 10)
+
+        # 失效降级互通：订阅 /mission_event，接收 ego planner 侧的 OBSTACLE 上报，
+        # 与 perform_action 返回值（STALLED）共同计入不可达判定（时间窗去重防双计）。
+        self.mission_event_sub = self.node.create_subscription(
+            String, "/mission_event", self._mission_event_callback, 10)
+        self.last_obstacle_ts = 0.0   # 同 reason 去重时间窗起点
+        self._unreachable_dedup_win = 3.0  # 3s 内同一 reason 只计一次
+
+        # 航点失效判定状态（编排侧，跨航点累计）
+        #  same_point_retry : 同一航点不可达重试计数（>=3 → 跳过该航点）
+        #  consec_goals     : 连续不同航点不可达计数（>=2 → 返航）
+        self.same_point_retry = 0
+        self.consec_goals = 0
+        self.goal_seq_counter = 0
+        self.waypoint_max_retry = 3        # 同一航点最多重试 3 次
+        self.waypoint_consec_limit = 2     # 连续 2 个航点不可达 → 返航
+
         logger.info('巡检任务管理器初始化完成')
-    
+
+    def _mission_event_callback(self, msg: String):
+        """订阅 /mission_event：接收 ego planner 的目标障碍上报，计入不可达判定。"""
+        try:
+            data = json.loads(msg.data)
+            event = data.get('event')
+            source = data.get('source', '')
+            if event != 'GOAL_UNREACHABLE':
+                return
+            reason = data.get('reason', '')
+            # 只消费 planner 侧 OBSTACLE；STALLED 已由 perform_action 返回值同步计入，避免双计
+            if source == 'planner' and reason == 'OBSTACLE':
+                now = time.time()
+                with self._lock:
+                    if now - self.last_obstacle_ts >= self._unreachable_dedup_win:
+                        self.last_obstacle_ts = now
+                        self.same_point_retry += 1
+                        logger.warning(f"[mission_event] 收到 ego OBSTACLE 上报，同点重试={self.same_point_retry}")
+        except Exception as e:
+            logger.warning(f"解析 /mission_event 失败: {e}")
+
+    def _publish_mission_event(self, event: str, **fields):
+        """发布 /mission_event（String+JSON），字段按完整失效降级方案 §14 对齐。"""
+        try:
+            payload = {"event": event}
+            payload.update(fields)
+            msg = String()
+            msg.data = json.dumps(payload, ensure_ascii=False)
+            self.mission_event_pub.publish(msg)
+            logger.info(f"[mission_event] {msg.data}")
+        except Exception as e:
+            logger.warning(f"发布 mission_event 失败: {e}")
+
+    def _handle_waypoint_unreachable(self, task_id: str, pos: Dict[str, Any]) -> bool:
+        """
+        处理单个航点不可达（GOAL_UNREACHABLE）。返回 True=任务应终止(返航/迫降)，False=继续。
+
+        判定规则（编排侧，完整判断不简化）：
+          - 同一航点不可达累计 count >= waypoint_max_retry(3) → 跳过该航点(GOAL_SUBSTITUTED)，
+            累计 consec_goals += 1；未到 3 次则等待重试(GOAL_UNREACHABLE 继续累计)。
+          - 连续不同航点不可达 count >= waypoint_consec_limit(2) → RETURN_INIT 触发返航。
+          - 返航段（RETURN_BLOCKED）：返航途中遇障不可达 且 无更近可绕航点 → 迫降。
+        """
+        # 共享计数器读写与 _mission_event_callback 共锁（两线程：任务线程 + executor 回调线程）
+        with self._lock:
+            self.same_point_retry += 1
+            cnt = self.same_point_retry
+            consec = self.consec_goals
+            seq = self.goal_seq_counter
+        self._publish_mission_event(
+            'GOAL_UNREACHABLE',
+            goal_seq=seq,
+            flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+            count=cnt,
+            reason='STALLED')
+        logger.warning(f"[航点失效] task={task_id} 航点不可达, 同点重试={cnt}/{self.waypoint_max_retry}, "
+                       f"连续跨点失败={consec}/{self.waypoint_consec_limit}")
+
+        # 1) 同一航点未达重试上限 → 返回继续，让外层重试同一航点
+        if cnt < self.waypoint_max_retry:
+            return False
+
+        # 2) 同一航点达上限 → 跳过该航点，去下一航点；累计跨点失败
+        with self._lock:
+            self.same_point_retry = 0
+            self.consec_goals += 1
+            self.goal_seq_counter += 1
+            consec = self.consec_goals
+            seq = self.goal_seq_counter
+        next_seq = seq + 1
+        self._publish_mission_event(
+            'GOAL_SUBSTITUTED',
+            goal_seq=seq,
+            next=next_seq,
+            flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+            reason='SKIP_3X')
+        logger.warning(f"[跳点] task={task_id} 跳过航点 go to next={next_seq}, 连续跨点失败={consec}/{self.waypoint_consec_limit}")
+
+        # 3) 连续跨点失败达上限 → 返航
+        if consec >= self.waypoint_consec_limit:
+            logger.error(f"[返航] task={task_id} 连续 {consec} 个航点不可达，触发返航")
+            self._publish_mission_event(
+                'RETURN_INIT',
+                goal_seq=seq,
+                flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+                consec_goals=consec,
+                trigger='REACH_FAIL')
+            # 返航执行：回原点；若返航段遇障不可达 → RETURN_BLOCKED → 迫降（在锁外执行，避免长阻塞持锁）
+            return self._return_to_origin(task_id)
+
+        # 4) 尚未达连续上限，跳过本航点继续下一航点（外层循环自然 continue）
+        return False
+
+    def _return_to_origin(self, task_id: str) -> bool:
+        """返航回原点；返航途中遇障无法推进 → RETURN_BLOCKED 并触发迫降。"""
+        self._publish_mission_event(
+            'RETURN_INIT',
+            goal_seq=self.goal_seq_counter,
+            flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+            consec_goals=self.consec_goals,
+            trigger='RETURN')
+        origin_pos = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'd': 0.0}
+        result = self.perform_action_manager.perform_action_walk_to_pos_3d(origin_pos)
+        success = result.get('success', False)
+        if not success:
+            logger.error(f"[返航受阻] task={task_id} 返航途中不可达，触发迫降")
+            self._publish_mission_event(
+                'RETURN_BLOCKED',
+                goal_seq=self.goal_seq_counter,
+                flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+                reason='OBSTACLE_BLOCKED')
+            # 迫降执行：直接下发 LAND 命令（复用 uav_mission_manager 迫降状态机）
+            self._emergency_land(task_id)
+            return True
+        logger.info(f"[返航完成] task={task_id} 已回原点")
+        return True
+
+    def _emergency_land(self, task_id: str) -> bool:
+        """迫降：下发 LAND 命令，复用 uav_mission_manager 的 LANDING→DISARMING 状态机。"""
+        logger.error(f"[迫降] task={task_id} 执行应急迫降")
+        try:
+            self.uav_command_sender.send_command('LAND')
+            return True
+        except Exception as e:
+            logger.error(f"[迫降] 下发 LAND 失败: {e}")
+            return False
+
     def process_cruise_task(self, message_data):
         """
         处理巡检任务相关命令
@@ -505,15 +651,50 @@ class CruiseUavTaskManager:
                         self.rtst_record_manager.stop_recording()
                         return
 
-                    # 2、处理move动作
-                    result_action = self.perform_action_manager.perform_action_walk_to_pos_3d(pos)
-                    if not result_action.get('success', False):
-                        logger.error(f'移动动作执行失败，已停止')
-                        self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')
-                        self.rtst_record_manager.stop_recording()
-                        return
+                    # 2、处理move动作（含航点失效判定：同点重试≥3跳点 / 连续2点不可达返航 / 返航遇障迫降）
+                    with self._lock:
+                        self.goal_seq_counter += 1
+                    skipped_current = False
+                    while True:  # 同一航点重试循环
+                        result_action = self.perform_action_manager.perform_action_walk_to_pos_3d(pos)
+                        if result_action.get('success', False):
+                            # 到达成功：重置同点重试与连续跨点失败累计
+                            with self._lock:
+                                self.same_point_retry = 0
+                                self.consec_goals = 0
+                            break
+                        # 成功=False：区分「停滞不可达(GOAL_UNREACHABLE)」与「其他失败」
+                        msg = result_action.get('message', '')
+                        if msg.startswith('GOAL_UNREACHABLE'):
+                            should_end = self._handle_waypoint_unreachable(task_id, pos)
+                            if should_end:  # 已触发返航/迫降，任务终止
+                                self._report_task_status(task_id, TaskStatus.ABORTED.value, '航点不可达，已转入返航/迫降')
+                                self.rtst_record_manager.stop_recording()
+                                return
+                            # False：同点未达3次继续重试；或已跳过本航点(consec<2 继续下一航点)
+                            with self._lock:
+                                retry_now = self.same_point_retry
+                                consec_now = self.consec_goals
+                            if retry_now == 0 and consec_now > 0:
+                                # 已跳过本航点且未达连续上限 → 跳过该段巡检动作，进入下一航点
+                                skipped_current = True
+                                break
+                            # 仍在同点重试计数中 → 继续 while 重试同一航点
+                            continue
+                        else:
+                            # 其他失败（非不可达）→ 按原逻辑中止任务
+                            logger.error(f'移动动作执行失败，已停止: {msg}')
+                            self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')
+                            self.rtst_record_manager.stop_recording()
+                            return
 
                     action_idx += 1
+                    if skipped_current:
+                        # 本航点不可达已被跳过：不执行该点 endActions 巡检动作（飞机不在该点）
+                        self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 第{cruise_idx}段航点不可达，已跳过巡检动作')
+                        logger.warning(f"执行巡检任务task_id={task_id}, 【第{cruise_idx}段】航点不可达已跳过，不执行该段巡检动作")
+                        continue
+
                     self._report_task_status(task_id, TaskStatus.IN_PROGRESS.value, f'执行巡检任务task_id={task_id}, 第{action_idx}个动作执行完成，移动到目标位置')
                     logger.info(f"执行巡检任务task_id={task_id}, 【第{action_idx}个动作】执行完成, 移动到目标位置")
                                     
@@ -547,13 +728,15 @@ class CruiseUavTaskManager:
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
             
             time.sleep(1)
+            
             if ENABLE_DOCK_CONTROL:
-                # 任务完成
+                 # 任务完成
                 try:
-                    self.dock_control_client.land_charge_sequence()    
+                    self.dock_control_client.land_charge_sequence()
                 except Exception as e:
                     logger.error(f'降落序列执行异常: {str(e)}')
-                        
+
+
             logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
             self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
             
@@ -648,14 +831,14 @@ class CruiseUavTaskManager:
                 # 执行巡检任务    
                 self._processing_cruise_task(task_id, body)
                 
-                if ENABLE_DOCK_CONTROL:
+                #if ENABLE_DOCK_CONTROL:
                     # 任务完成
-                    try:
-                        dock_status, dock_msg = self.dock_control_client.land_sequence()
+                #    try:
+                #        dock_status, dock_msg = self.dock_control_client.land_sequence()
                         
-                    except Exception as e:
-                        logger.error(f'降落序列执行异常: {str(e)}')
-                        dock_status, dock_msg = False, str(e)
+                #    except Exception as e:
+                #       logger.error(f'降落序列执行异常: {str(e)}')
+                #        dock_status, dock_msg = False, str(e)
                         
                 # 关闭导航服务
                 logger.info('停止ego_planner.service服务...')
@@ -909,8 +1092,11 @@ class CruiseUavTaskManager:
             
             # 4. 等待服务调用结果（添加超时机制防止死循环）
             service_timeout = 60.0  # 服务调用超时时间（秒）
-            rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
-            
+            #rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < service_timeout:
+                time.sleep(0.1)
+
             #检查是否超时
             if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
@@ -1090,7 +1276,7 @@ class CruiseUavTaskManager:
         retry_interval = 10  # 初始重试间隔（秒）
         max_retry_interval = 60  # 最大重试间隔（秒）
         retry_count = 0
-        max_retries = 1  # 最大重试次数，防止无限重试
+        max_retries = 2  # 最大重试次数，防止无限重试
         
         while rclpy.ok() and retry_count < max_retries:
             # 检查点云文件是否仍然存在

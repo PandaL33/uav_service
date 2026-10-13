@@ -1004,3 +1004,69 @@ done
 - 网络检测：5秒
 
 ---
+
+## 在线/离线运行前置（核对结论）
+
+### 1. 在线任务派发节点：PYTHONPATH 必须包含包内模块目录
+
+包里混用了两种导入方式：`from task_dispatcher.xxx import ...`（按包导入）与
+`from uav_command_sender import ...`、`from config import ROBOT_TYPE`（按顶层模块导入）。
+因此只把 `src/task_dispatcher` 放进 `sys.path` 是不够的，导入会直接失败：
+
+```text
+ModuleNotFoundError: No module named 'config'      # 或 'uav_command_sender'
+```
+
+必须**同时**把内层模块目录也加进去。自测：
+
+```bash
+python3 -c "import sys; \
+sys.path[:0]=['<ws>/src/task_dispatcher', '<ws>/src/task_dispatcher/task_dispatcher']; \
+import task_dispatcher.cruise_uav_task_manager as m; print('OK', m.__name__)"
+```
+
+`scripts/task_dispatcher_x86.service` / `_arm.service` 里的
+`Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"` 并不含该目录，
+部署时建议补成（按实际路径替换）：
+
+```ini
+Environment="PYTHONPATH=/home/cat/uav_service/src/task_dispatcher/task_dispatcher:/home/cat/.local/lib/python3.10/site-packages"
+```
+
+说明：这是恢复源码之前就存在的打包约束（`setup.py` 把 `task_dispatcher/*.py` 另存到
+`lib/task_dispatcher/`，而 ament_python 不会把该目录加入 `sys.path`），**不是**离线仿真改造引入的。
+
+### 2. 接口包必须先在 ROS 工作区里构建
+
+`perform_action_manager.py` 顶层 import 了 `robot_interface.srv`（`Move`/`SetCtrlMode`）与
+`multi_algo_interfaces.srv`（`AlgoControl`），二者源码就在本仓 `src/` 下，但它们是 ROS 包，
+必须被工作区构建过一次才能被在线/离线代码导入：
+
+```bash
+# 在本仓所在工作区（如 <ws>/src/ 下）执行
+colcon build --paths uav_service/src/robot_interface uav_service/src/multi_algo_interfaces
+```
+
+若工作区 `install/` 已被清空重建而未包含这两个包，在线节点会在 import 阶段直接失败。
+
+### 3. 话题名与命名空间
+
+在线代码里 `/fmu/in|out/...`、`/goal_pose_3d`、`/uav_command`、`/mission_event` 均为绝对名
+（真机单机部署无命名空间），不需要 remap；仿真里的 `/x500_depth_0/` 前缀只在离线 launch 中
+用 remap 处理，不影响在线。
+
+### 4. 仿真离线航线（offline_sim）
+
+- 位置：`src/task_dispatcher/task_dispatcher/offline_sim/`（离线入口、命令桥、routes 样例）。
+- 必须作为**独立进程**运行：它会替换本进程内的 `task_dispatcher.config` 与
+  `cruise_uav_task_manager.subprocess`（旁路 systemd 起停导航服务、HTTP 拉图、MQTT 上报），
+  在同一进程里导入会污染在线行为。
+- 在线两个核心文件（`cruise_uav_task_manager.py`、`perform_action_manager.py`）与在线版本
+  **零差异**，离线复用同一条入口链：`process_cruise_task('SETCRUISETASK')` →
+  `_execute_task_thread` → `_processing_cruise_task` → `perform_action_walk_to_pos_3d`。
+- `setup.py` 的 `data_files` 只收 `task_dispatcher/*.py`，不含子目录，所以 colcon 安装不会带上
+  `offline_sim/`；离线的跑法是按源码路径执行（`launch/offline_route_sim.launch.py` 即如此）。
+- 本仓在 XTDrone2_ego_planner 里以 **git submodule** 形式挂在 `uav_service/`，
+  更新方式：`git submodule update --remote uav_service`。
+- 依赖准备：`bash scripts/setup_offline_sim_env.sh`（只装 paho/gpiod/cv2 等本机缺失项，
+  不构建接口包）。

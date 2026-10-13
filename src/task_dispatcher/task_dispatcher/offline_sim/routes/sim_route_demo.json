@@ -1,0 +1,20 @@
+{
+  "_comment": "仿真离线航线（格式A：与 xtd2_launch/web/pcd_waypoint_planner.html 导出的 JSON 同构，可直接用该页面导出后覆盖本文件）",
+  "_usage": "ros2 launch <repo>/uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py route_file:=<本文件路径>",
+  "_frame": "规划器 world 系（在线 goal 用 frame_id=map，仿真里 tf_publisher 有 map->odom->world 恒等链）；z 为雷达帧高度(约等于机体高度+0.2)，起飞由 multirotor_communication 自动完成(解锁->起飞1.5m->offboard)",
+  "_yaw": "页面只导出坐标，方向由加载器按 yaw_mode 补（默认 smooth=Catmull-Rom 曲线切线）。要机头对准被检物时，给该航点显式写 \"d\": 弧度 —— 显式值优先，不会被覆盖。",
+  "frame": "map",
+  "count": 5,
+  "waypoints": [
+    { "index": 1, "x": 2.0, "y": 0.0, "z": 1.8 },
+    { "index": 2, "x": 2.0, "y": 2.0, "z": 1.8 },
+    { "index": 3, "x": -2.0, "y": 2.0, "z": 2.0 },
+    { "index": 4, "x": -2.0, "y": 0.0, "z": 2.0 },
+    { "index": 5, "x": 0.0, "y": 0.0, "z": 1.8 }
+  ],
+  "taskName": "offline_sim_circuit",
+  "type": "once",
+  "mapName": "3_3clean",
+  "savePointCloud": false,
+  "enable": true
+}
