@@ -15,9 +15,9 @@ setup(
         (os.path.join('share', package_name, 'launch'),
          glob('launch/*.launch.py')),
         (os.path.join('lib', package_name), glob('multi_algo_manager/*.py')),
-        # 使用递归方式包含所有模型文件和目录
+        # 模型说明文件（模型本体不入库，目录可能不存在）：用 glob 保证缺失时自动跳过
         (os.path.join('share', package_name, 'models'),
-         ['models/README.md']),
+         glob('models/*.md')),
         (os.path.join('share', package_name, 'models', 'trash_detect', 'pytorch_model'),
          glob('models/trash_detect/pytorch_model/*')),
         (os.path.join('share', package_name, 'models', 'trash_detect', 'best_rknn_model_trash'),
