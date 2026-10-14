@@ -54,7 +54,7 @@ class PerformActionManager:
         #   stall_time_s    : 连续无有效推进的秒数阈值，触发一次停滞判定
         #   stall_dist_min  : 单次判定期内必须至少推进的水平距离(m)，否则视为停滞
         #   stall_progress  : 停滞判定期的采样间隔(s)
-        self.waypoint_stall_time_s = 5.0          # 5s 无推进 → 判定不可达
+        self.waypoint_stall_time_s = 10.0         # 10s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
         self.waypoint_min_progress = 0.15         # 2s 内须推进 >= 0.15m，否则停滞计数+1
 
@@ -205,6 +205,14 @@ class PerformActionManager:
         except Exception:
             return None
 
+    def _is_airborne(self) -> bool:
+        """飞机是否已起飞（解锁且 takeoff_time>0）。起桨/离地前返回 False。"""
+        try:
+            takeoff_time, arming_state = self.topic_subscriber.get_takeoff_time_and_arming_state()
+            return takeoff_time > 0 and arming_state == 2
+        except Exception:
+            return False
+
     def perform_action_walk_to_origin_pos(self):
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.node.get_clock().now().to_msg()
@@ -288,11 +296,13 @@ class PerformActionManager:
                 pose_msg.pose.position.y = y_pos
                 pose_msg.pose.position.z = z_pos
 
-                x, y, z, w = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
-                pose_msg.pose.orientation.x = float(x)
-                pose_msg.pose.orientation.y = float(y)
-                pose_msg.pose.orientation.z = float(z)
-                pose_msg.pose.orientation.w = float(w)
+                # 注意：四元数分量必须用独立变量名，绝不能复用 x/y/z，
+                # 否则会把航点坐标覆盖成四元数分量，停滞 watchdog 会误把 (0,0) 当目标
+                qx, qy, qz, qw = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
+                pose_msg.pose.orientation.x = float(qx)
+                pose_msg.pose.orientation.y = float(qy)
+                pose_msg.pose.orientation.z = float(qz)
+                pose_msg.pose.orientation.w = float(qw)
                 logger.info(f"publish goal_pose_3d: {pose_msg} angle={math.degrees(yaw):.2f}")
 
                 # 2.等待是否到达目标点（含停滞 watchdog，避免 0918「悬停至耗尽电量」）
@@ -303,6 +313,7 @@ class PerformActionManager:
                 st_stall_accum = 0.0          # 累计停滞秒数
                 st_last_dist = self._get_current_target_dist(x, y, z)
                 st_last_sample_t = time.time()
+                st_pause_logged = False       # 起飞前暂停判定的提示只打一次
                 while True:
                     self.goal_pose_pub_3d.publish(pose_msg)
 
@@ -321,6 +332,19 @@ class PerformActionManager:
                             'success': True,
                             'message': f'飞行动作执行成功: 目标坐标点(x={x}, y={y}, z={z}, d={d})'
                         }
+
+                    # ---- 起飞前暂停判定 ----
+                    # 航点不可达的判断必须在起飞后：起桨/离地阶段飞机静止属正常，
+                    # 此时不累计停滞，持续重发目标点并复位采样基准，起飞后再开始判定。
+                    if not self._is_airborne():
+                        st_stall_accum = 0.0
+                        st_last_dist = self._get_current_target_dist(x, y, z)
+                        st_last_sample_t = time.time()
+                        if not st_pause_logged:
+                            logger.info(f'飞机尚未起飞，暂停停滞不可达判定, 目标坐标点: ({x}, {y}, {z})')
+                            st_pause_logged = True
+                        time.sleep(0.2)
+                        continue
 
                     # ---- 停滞 watchdog ----
                     now_t = time.time()

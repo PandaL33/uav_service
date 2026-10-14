@@ -116,6 +116,7 @@ class CruiseUavTaskManager:
         self.current_task_id: Optional[str] = None
         # 任务执行状态标志
         self.is_executing: bool = False
+        self._task_thread: Optional[threading.Thread] = None  # 当前任务线程引用（即时指令接管时 join 用）
         # 线程锁，用于保护共享变量
         self._lock = threading.Lock()
         # 巡航任务列表
@@ -418,6 +419,17 @@ class CruiseUavTaskManager:
     def _execute_uav_command(self, kind, action_id, params, aborted_task):
         """即时指令执行体（独立线程，避免占住 MQTT 网络线程导致后续指令收不到）。"""
         status, message = TaskStatus.ABORTED.value, f'{kind} 执行失败'
+
+        # 接管竞态修复：set_stop_action(True) 后必须等旧任务线程真正退出，
+        # 再放开 stop 让返航/降落线程发新目标点；否则旧 move 循环（0.2s 轮询 stop）
+        # 可能与新目标发布并发，planner 收到交替目标点来回抖动。
+        if aborted_task:
+            old_thread = self._task_thread
+            if old_thread is not None and old_thread.is_alive():
+                old_thread.join(timeout=5.0)
+                if old_thread.is_alive():
+                    logger.error('[即时指令] 旧任务线程 5s 内未退出，继续接管（存在双目标发布风险）')
+
         try:
             if kind == 'HOVER':
                 # 已停规划且不再下发目标点：traj_server 持续发送当前位置设定点＝原地悬停
@@ -619,7 +631,8 @@ class CruiseUavTaskManager:
                     self.is_executing = True
                     self.current_task_id = task_id
                 # 下发巡检任务到机器人（放入线程中执行，避免阻塞MQTT处理）
-                threading.Thread(target=self._execute_task_thread, args=(task_id, body), daemon=True).start()
+                self._task_thread = threading.Thread(target=self._execute_task_thread, args=(task_id, body), daemon=True)
+                self._task_thread.start()
 
             # 发送成功响应
             self.send_ack_response(message_data, 200, 'ok')
@@ -691,7 +704,8 @@ class CruiseUavTaskManager:
                 self.current_task_id = task_id
 
             # 下发巡检任务到机器人（放入线程中执行，避免阻塞MQTT处理）
-            threading.Thread(target=self._execute_task_thread, args=(task_id, self.tasks[task_id]), daemon=True).start()
+            self._task_thread = threading.Thread(target=self._execute_task_thread, args=(task_id, self.tasks[task_id]), daemon=True)
+            self._task_thread.start()
             
             # 发送确认响应
             self.send_ack_response(message_data, 200, 'ok')
