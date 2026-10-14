@@ -15,7 +15,7 @@ class CommandDeliver:
     远程指令下发类，负责处理CommandDeliver命令并调用相应的执行接口
     """
     
-    def __init__(self, node, mqtt_client, response_topic):
+    def __init__(self, node, mqtt_client, response_topic, uav_command_handler=None):
         """
         初始化远程指令下发类
         
@@ -23,10 +23,14 @@ class CommandDeliver:
             node: ROS2节点实例
             mqtt_client: MQTT客户端实例
             response_topic: MQTT响应主题
+            uav_command_handler: 无人机即时指令执行器（CruiseUavTaskManager.process_uav_command），
+                                 注入后 COMMANDDELIVER 与 UAVCOMMAND 走同一条链路；不注入则保持
+                                 原有的“仅记录”行为
         """
         self.node = node
         self.mqtt_client = mqtt_client
         self.mqtt_response_topic = response_topic
+        self.uav_command_handler = uav_command_handler
         
         logger.info('远程指令下发类初始化完成')
     
@@ -73,7 +77,14 @@ class CommandDeliver:
             else:
                 # 其他类型机器人，预留接口
                 logger.info(f'非FFR机器人类型，指令下发命令已记录: {command}')
-            
+
+            # 无人机的即时飞控指令（LAND/RTL/RTL_ROUTE/HOVER/EMERGENCY_LAND）转给统一执行体：
+            # 由它负责“接管在飞任务 -> 停规划 -> 执行”，并自己发受理 Ack 与终态 ActionReport
+            # （不认识或参数不对时由它回 400），因此这里必须 return，避免重复回 200 掩盖真实结果。
+            if ROBOT_TYPE != 'ffr' and self.uav_command_handler is not None:
+                self.uav_command_handler(message_data)
+                return
+
             # 发送成功响应
             self.send_ack_response(message_data, 200, 'ok')
             

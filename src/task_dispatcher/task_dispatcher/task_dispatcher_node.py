@@ -169,10 +169,12 @@ class TaskDispatcherNode(Node):
         )
         
         # 初始化远程指令下发类
+        # uav_command_handler 用延迟绑定：COMMANDDELIVER 与 UAVCOMMAND 共用同一个即时指令执行体
         self.command_deliver = CommandDeliver(
             node=self,
             mqtt_client=self.mqtt_client,
-            response_topic=self.mqtt_response_topic
+            response_topic=self.mqtt_response_topic,
+            uav_command_handler=lambda msg: self.cruise_uav_task_manager.process_uav_command(msg)
         )
         
         # 初始化巡检任务管理器
@@ -367,6 +369,14 @@ class TaskDispatcherNode(Node):
                 'INITIALPOSE': lambda: self._handle_initial_pose(message_data, '初始化定位信息'),
                 'DEVICECONTROL': lambda: self._handle_device_control(message_data, '设备控制'),
                 'COMMANDDELIVER': lambda: self._handle_command_deliver(message_data, '远程指令下发'),
+                # 平台即时飞控指令：原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降
+                # 两种写法都收：命令码直接给（cmd=LAND），或走通道码（cmd=UAVCOMMAND + body.command）
+                'UAVCOMMAND': lambda: self._handle_uav_command(message_data, '平台即时飞控指令'),
+                'LAND': lambda: self._handle_uav_command(message_data, '平台下发原地降落'),
+                'HOVER': lambda: self._handle_uav_command(message_data, '平台下发悬停'),
+                'RTL': lambda: self._handle_uav_command(message_data, '平台下发直线返航'),
+                'RTLROUTE': lambda: self._handle_uav_command(message_data, '平台下发沿线返航'),
+                'EMERGENCYLAND': lambda: self._handle_uav_command(message_data, '平台下发迫降'),
             }
             
             # 根据命令码调用相应的处理函数
@@ -493,6 +503,15 @@ class TaskDispatcherNode(Node):
         """处理远程指令下发命令"""
         logger.info(f'收到{command_name}命令')
         self.command_deliver.process_command_deliver(message_data)
+
+    def _handle_uav_command(self, message_data, command_name):
+        """处理平台即时飞控指令（原地降落/直线返航/沿线返航/悬停/迫降）。
+
+        与航线任务共用同一个执行体（CruiseUavTaskManager），保证接管顺序、
+        停规划入口和上报格式完全一致。
+        """
+        logger.info(f'收到{command_name}命令')
+        self.cruise_uav_task_manager.process_uav_command(message_data)
 
     def _handle_get_service_list(self, message_data, command_name):
         """处理获取服务列表命令"""

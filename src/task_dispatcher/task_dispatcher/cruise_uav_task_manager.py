@@ -3,6 +3,7 @@
 
 import json
 import logging
+import math
 import time
 import threading
 import os
@@ -11,8 +12,9 @@ import requests
 import rclpy
 import asyncio
 import subprocess
-from std_msgs.msg import String
-from typing import Dict, List, Optional, Any
+from std_msgs.msg import String, Empty
+from px4_msgs.msg import VehicleCommand, VehicleStatus
+from typing import Dict, List, Optional, Any, Tuple
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import uuid
 from task_dispatcher.message_cache import message_cache_manager
@@ -153,6 +155,18 @@ class CruiseUavTaskManager:
         self.waypoint_max_retry = 3        # 同一航点最多重试 3 次
         self.waypoint_consec_limit = 2     # 连续 2 个航点不可达 → 返航
 
+        # ===== 平台即时飞控指令（原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降）=====
+        # ego_planner 的控制入口：traj_server 收到 /stop_planning 会停止发送轨迹并清掉
+        # 目标点与 SZD 状态（xtd2_traj_server.cpp stopPlanningCallback）。没新目标点时它
+        # 改为持续发送“当前位置”设定点，即飞机原地悬停 —— 这是降落前必须先把控制权
+        # 交回飞控的原因，否则 planner 的 offboard 设定点会与 PX4 原生 LAND/RTL 抢控制。
+        self.stop_planning_pub = self.node.create_publisher(Empty, "/stop_planning", 10)
+        # 已成功到达的航点（“沿线返航”按此倒序退回）。只在新任务开始时清空，
+        # reset_status() 不清 —— 否则停止任务后就找不到来路航点了。
+        self.visited_waypoints: List[Dict[str, float]] = []
+        # 即时指令互斥：同一时刻只跑一条，避免降落与返航互相抢控制权
+        self.instant_cmd: Optional[str] = None
+
         logger.info('巡检任务管理器初始化完成')
 
     def _mission_event_callback(self, msg: String):
@@ -280,6 +294,250 @@ class CruiseUavTaskManager:
         except Exception as e:
             logger.error(f"[迫降] 下发 LAND 失败: {e}")
             return False
+
+    # ==================================================================================
+    # 平台即时飞控指令：原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降
+    #
+    # 统一走同一条链路：先接管（停当前航点目标点发布）-> 停规划（/stop_planning 把控制权
+    # 交回飞控）-> 再执行；回执分两级：Ack 只代表“已受理并接管”，落地/返航完成由
+    # ActionReport 收尾（taskProgress 2=完成 3=中断）。
+    # ==================================================================================
+
+    # 归一后的指令种类
+    UAV_COMMAND_KINDS = ('HOVER', 'LAND', 'EMERGENCY_LAND', 'RTL', 'RTL_ROUTE')
+
+    # 平台可能的多种写法（命令码与 body.command 都先过这张表）
+    UAV_COMMAND_ALIASES = {
+        'HOVER': 'HOVER', 'HOLD': 'HOVER', 'PAUSE': 'HOVER', 'SUSPEND': 'HOVER', '悬停': 'HOVER',
+        'LAND': 'LAND', 'LANDING': 'LAND', 'DESCEND': 'LAND', '降落': 'LAND', '原地降落': 'LAND',
+        'EMERGENCY_LAND': 'EMERGENCY_LAND', 'FORCE_LAND': 'EMERGENCY_LAND', '迫降': 'EMERGENCY_LAND',
+        'RTL': 'RTL', 'RTL_STRAIGHT': 'RTL', 'RETURN': 'RTL', 'RETURN_HOME': 'RTL',
+        '返航': 'RTL', '直线返航': 'RTL',
+        'RTL_ROUTE': 'RTL_ROUTE', 'RTL_BY_WAYPOINTS': 'RTL_ROUTE', 'RETURN_ROUTE': 'RTL_ROUTE',
+        '沿线返航': 'RTL_ROUTE',
+    }
+
+    # 返航终点＝原点；z=0 会让 planner 在 ±0.5m 安全区内自动切 SZD 降落
+    RETURN_HOME_POS = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'd': 0.0}
+
+    @staticmethod
+    def normalize_uav_command(raw) -> Optional[str]:
+        """把平台写法归一成指令种类，不认识返回 None（英文大小写/分隔符都容忍）。"""
+        aliases = CruiseUavTaskManager.UAV_COMMAND_ALIASES
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        key = raw.strip().upper().replace('-', '_').replace(' ', '_')
+        key = key.replace('__', '_').strip('_')
+        if key in aliases:
+            return aliases[key]
+        return aliases.get(raw.strip())      # 中文键不受 upper() 影响，原样再查一次
+
+    @staticmethod
+    def flip_yaw(rad: float) -> float:
+        """机头反向 180 度并归一到 [-pi, pi]（沿线返航回程朝向与来时相反）。"""
+        return (rad + math.pi + math.pi) % (2 * math.pi) - math.pi
+
+    def parse_uav_command(self, message_data) -> Tuple[Optional[str], str, Dict[str, Any]]:
+        """从报文取即时指令：优先 body.command，其次命令码本身。返回 (kind, actionId, params)。"""
+        body = message_data.get('body')
+        body = body if isinstance(body, dict) else {}
+        raw = body.get('command') or body.get('cmd') or message_data.get('cmd', '')
+        # 命令码本身不是具体动作（UAVCOMMAND/COMMANDDELIVER 只是通道），必须给 body.command
+        if isinstance(raw, str) and raw.strip().upper() in ('UAVCOMMAND', 'COMMANDDELIVER'):
+            raw = ''
+        kind = self.normalize_uav_command(raw)
+        action_id = str(body.get('actionId') or message_data.get('seq') or f'uavcmd_{int(time.time())}')
+        try:
+            land_timeout = float(body.get('timeoutSec', body.get('timeout', 60.0)))
+        except (TypeError, ValueError):
+            land_timeout = 60.0
+        try:
+            route_max_legs = int(body.get('maxLegs', 0) or 0)
+        except (TypeError, ValueError):
+            route_max_legs = 0
+        params = {'land_timeout': land_timeout if land_timeout > 0 else 60.0,
+                  'route_max_legs': max(0, route_max_legs)}
+        return kind, action_id, params
+
+    def process_uav_command(self, message_data):
+        """接收平台即时飞控指令（由 task_dispatcher_node 的命令表分发进来）。"""
+        kind, action_id, params = self.parse_uav_command(message_data)
+        if kind is None:
+            body = message_data.get('body') if isinstance(message_data.get('body'), dict) else {}
+            raw = body.get('command') or body.get('cmd') or ''
+            if not raw:
+                logger.error('[即时指令] 缺少 body.command，可选: %s', '/'.join(self.UAV_COMMAND_KINDS))
+                self.send_ack_response(message_data, 400, f'missing body.command ({"/".join(self.UAV_COMMAND_KINDS)})', {})
+            else:
+                logger.error(f'[即时指令] 无法识别的命令: {raw}')
+                self.send_ack_response(message_data, 400, f'unknown command: {raw}', {})
+            return
+
+        with self._lock:
+            if self.instant_cmd is not None:
+                busy = self.instant_cmd
+            else:
+                busy = None
+                self.instant_cmd = kind
+                aborted_task = self.current_task_id if self.is_executing else None
+                if aborted_task:
+                    self.is_executing = False
+                    self.current_task_id = None
+                    self.cruises = []
+
+        if busy:
+            logger.warning(f'[即时指令] 已有即时指令在执行({busy})，拒绝 {kind}')
+            self.send_ack_response(message_data, 400, f'another instant command in progress: {busy}', {})
+            return
+
+        try:
+            # 1) 接管：停止当前航点的目标点发布（航线线程会因此走“其他失败”分支终止）
+            self.perform_action_manager.set_stop_action(True)
+            if aborted_task:
+                self.ros_topic_subscriber.set_cruises(self.cruises)
+                self._report_task_status(aborted_task, TaskStatus.CANCELED.value,
+                                         f'平台即时指令 {kind} 接管，任务终止')
+
+            # 2) 停规划：把控制权从 ego_planner 交回飞控（原生 LAND/RTL 与悬停都需要）
+            self._publish_stop_planning()
+
+            # 3) 受理回执
+            self.send_ack_response(message_data, 200, 'ok',
+                                   {'command': kind, 'actionId': action_id,
+                                    'abortedTaskId': aborted_task or ''})
+            logger.info(f'[即时指令] 受理 {kind} actionId={action_id} 中止任务={aborted_task}')
+
+            threading.Thread(target=self._execute_uav_command,
+                             args=(kind, action_id, params, aborted_task), daemon=True).start()
+        except Exception as e:
+            logger.error(f'[即时指令] 处理 {kind} 异常: {e}')
+            with self._lock:
+                self.instant_cmd = None
+            self.send_ack_response(message_data, 500, f'internal error: {e}', {})
+
+    def _execute_uav_command(self, kind, action_id, params, aborted_task):
+        """即时指令执行体（独立线程，避免占住 MQTT 网络线程导致后续指令收不到）。"""
+        status, message = TaskStatus.ABORTED.value, f'{kind} 执行失败'
+        try:
+            if kind == 'HOVER':
+                # 已停规划且不再下发目标点：traj_server 持续发送当前位置设定点＝原地悬停
+                status, message = TaskStatus.COMPLETED.value, 'HOVERING 已停止规划，原地悬停'
+            elif kind in ('LAND', 'EMERGENCY_LAND'):
+                self.uav_action_manager.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+                logger.info(f'[即时指令] {kind} 已下发 PX4 原生 LAND（落地后由 comms 自动上锁）')
+                status, message = self._finish_after_descent(kind, params)
+            elif kind == 'RTL':
+                status, message = self._return_home_straight(action_id, params)
+            elif kind == 'RTL_ROUTE':
+                status, message = self._return_home_along_route(action_id, params)
+        except Exception as e:
+            logger.exception(f'[即时指令] {kind} 执行异常: {e}')
+            status, message = TaskStatus.ABORTED.value, f'执行异常: {e}'
+        finally:
+            self._report_task_status(action_id, status, message)
+            with self._lock:
+                self.instant_cmd = None
+            # 交还“可下发目标点”的能力；不重新起规划，等下一条任务/指令
+            self.perform_action_manager.set_stop_action(False)
+            logger.info(f'[即时指令] {kind} 结束: progress={status} message={message}')
+
+    def _finish_after_descent(self, kind: str, params) -> Tuple[int, str]:
+        """下降/迫降的落地确认：只读 arming 状态，不重复发命令。"""
+        if self._wait_landed(params['land_timeout']):
+            return TaskStatus.COMPLETED.value, 'LANDED 原地降落完成并已上锁'
+        self.uav_action_manager.disarm()
+        return TaskStatus.ABORTED.value, f'{kind} 在 {params["land_timeout"]}s 内未确认落地，已补发上锁命令'
+
+    def _return_home_straight(self, action_id, params) -> Tuple[int, str]:
+        """直线返航（平台语义）：先给 planner 发 (0,0,1) 自主规划回原点悬停点，
+        到达后再发 (0,0,0)，末段由 planner 的 SZD 安全区自动切降落。"""
+        self.perform_action_manager.set_stop_action(False)   # 允许下发新目标点，planner 重新起规划
+        hover_pos = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'd': 0.0}
+        result = self.perform_action_manager.perform_action_walk_to_pos_3d(hover_pos)
+        if not result.get('success', False):
+            logger.error(f"[直线返航] 去原点悬停点 (0,0,1) 受阻: {result.get('message', '')}")
+            self._publish_mission_event(
+                'RETURN_BLOCKED',
+                goal_seq=self.goal_seq_counter,
+                flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+                reason='OBSTACLE_BLOCKED')
+            self._emergency_land(action_id)
+            if self._wait_landed(params['land_timeout']):
+                return TaskStatus.ABORTED.value, 'RTL 受阻已迫降并上锁'
+            self.uav_action_manager.disarm()
+            return TaskStatus.ABORTED.value, 'RTL 受阻已迫降，但未确认落地，已补发上锁命令'
+        # 到达 (0,0,1) 后发 (0,0,0)：复用现有返航收尾（SZD 安全区自动降落，含受阻迫降）
+        self._return_to_origin(action_id)
+        if self._wait_landed(params['land_timeout']):
+            return TaskStatus.COMPLETED.value, 'RTL_DONE 已回原点并降落上锁'
+        self.uav_action_manager.disarm()
+        return TaskStatus.ABORTED.value, f'已回原点但 {params["land_timeout"]}s 内未确认落地，已补发上锁命令'
+
+    def _return_home_along_route(self, action_id, params) -> Tuple[int, str]:
+        """沿线返航：按已到达航点倒序逐点退回（机头反向 180 度），每段仍由 planner 自主避障；
+        单段不可达就跳过退回更近的点，最后再走原点完成降落。"""
+        self.perform_action_manager.set_stop_action(False)
+        with self._lock:
+            history = list(self.visited_waypoints)
+        if not history:
+            logger.warning('[沿线返航] 无已到达航点记录，退化为直线返航')
+            return self._return_home_straight(action_id, params)
+
+        legs = list(reversed(history))
+        if params['route_max_legs'] > 0:
+            legs = legs[:params['route_max_legs']]
+        flown = skipped = 0
+        for pos in legs:
+            back = {'x': pos['x'], 'y': pos['y'], 'z': pos['z'], 'd': self.flip_yaw(pos.get('d', 0.0))}
+            result = self.perform_action_manager.perform_action_walk_to_pos_3d(back)
+            if result.get('success', False):
+                flown += 1
+                continue
+            msg = result.get('message', '')
+            if msg.startswith('GOAL_UNREACHABLE'):
+                logger.warning(f'[沿线返航] 该航点不可达，跳过继续退回更近的点: {back}')
+                skipped += 1
+                continue
+            logger.error(f'[沿线返航] 退回过程被中止: {msg}')
+            break
+        logger.info(f'[沿线返航] 来路航点 {len(history)} 个: 实退={flown} 跳过={skipped}')
+        return self._return_home_straight(action_id, params)
+
+    def _publish_stop_planning(self):
+        """ego_planner 控制入口：通知 traj_server 停止发送轨迹并清掉目标点/SZD 状态。"""
+        try:
+            self.stop_planning_pub.publish(Empty())
+            logger.info('[即时指令] 已发布 /stop_planning，planner 停止轨迹发送')
+        except Exception as e:
+            logger.error(f'[即时指令] 发布 /stop_planning 失败: {e}')
+
+    def _wait_landed(self, timeout: float) -> bool:
+        """等 PX4 落定上锁（arming_state=DISARMED）。上锁由 comms 的落地检测流程负责，
+        这里只做确认，超时返回 False 由调用方补发。"""
+        deadline = time.time() + max(5.0, float(timeout))
+        while time.time() < deadline and rclpy.ok():
+            try:
+                _, arming = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
+            except Exception as e:
+                logger.warning(f'读取解锁状态失败: {e}')
+                arming = None
+            if arming == VehicleStatus.ARMING_STATE_DISARMED:
+                logger.info('[即时指令] 已确认落地并上锁')
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _remember_visited_waypoint(self, pos: Dict[str, Any]) -> None:
+        """记录成功到达的航点（供沿线返航倒序退回），只保留必要字段并限制长度。"""
+        try:
+            item = {'x': float(pos['x']), 'y': float(pos['y']), 'z': float(pos['z']),
+                    'd': float(pos.get('d', 0.0) or 0.0)}
+        except (KeyError, TypeError, ValueError):
+            return
+        with self._lock:
+            self.visited_waypoints.append(item)
+            if len(self.visited_waypoints) > 200:
+                self.visited_waypoints = self.visited_waypoints[-200:]
 
     def process_cruise_task(self, message_data):
         """
@@ -597,6 +855,8 @@ class CruiseUavTaskManager:
             # 标记为正在执行（已经在线程外部设置）
             with self._lock:
                 self.cruises = [{'taskId': task_id, 'status': True}]
+                # 新任务开始：来路航点重新记录（供平台“沿线返航”倒序退回）
+                self.visited_waypoints = []
             self.ros_topic_subscriber.set_cruises(self.cruises)
             self.perform_action_manager.set_stop_action(False)
 
@@ -662,6 +922,8 @@ class CruiseUavTaskManager:
                             with self._lock:
                                 self.same_point_retry = 0
                                 self.consec_goals = 0
+                            # 记入来路（平台可下发“沿线返航”按此倒序退回）
+                            self._remember_visited_waypoint(pos)
                             break
                         # 成功=False：区分「停滞不可达(GOAL_UNREACHABLE)」与「其他失败」
                         msg = result_action.get('message', '')
