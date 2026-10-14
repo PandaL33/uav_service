@@ -12,13 +12,15 @@
          ros2 launch uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
        换航线：route_file:=<绝对路径或裸文件名>；只看报文不真飞：追加 dry_run:=true
 
-本启动文件包含 2 个进程 + 1 个就绪门
+本启动文件包含 2 个进程 + 1 个就绪门（航线进程退出后会话自动结束）
     - sim_uav_command_bridge   : /uav_command(LAND/RTL/...) -> multirotor_communication 的 XTD2Cmd 服务
                                  （用于验证“连续航点不可达 -> 返航受阻 -> 迫降”分支）
     - wait_sim_ready           : 等 PX4 SITL 里程计已发布 + ego_planner 已订阅目标点话题
     - offline_cruise_sim_node  : 读航点 JSON（页面只给坐标，方向按 yaw_mode 自动补），走与在线同一条入口
                                  process_cruise_task('SETCRUISETASK') -> _execute_task_thread
                                  -> _processing_cruise_task -> perform_action_walk_to_pos_3d
+    航线进程一退出（正常完成 / max_wait 超时 / 快速失败），本会话即 Shutdown，命令桥一起收掉；
+    仿真侧 ros2_single_vehicle_demo_launch.py 是另一个会话，不受影响，想停要自己 Ctrl-C。
 
 关于位置来源
     在线由激光定位发布 /pcl_pose；离线仿真不提供这个话题，也不额外造话题——
@@ -34,7 +36,8 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, RegisterEventHandler
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction,
+                            RegisterEventHandler, Shutdown)
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 
@@ -171,10 +174,23 @@ exit 1
         OnProcessExit(target_action=wait_ready, on_exit=[route_runner])
     )
 
+    # 航线进程退出 = 本轮离线测试结束（成功降落 / 超时 / 快速失败都会走到这里）。
+    # 命令桥是长驻节点，不主动关掉的话 ros2 launch 会话会一直挂着不返回 shell。
+    # exit_on_finish:=false 时航线进程不退出，因此也不会触发关闭。
+    close_on_finish = RegisterEventHandler(
+        OnProcessExit(
+            target_action=route_runner,
+            on_exit=[
+                LogInfo(msg='离线航线进程已结束，关闭本次启动会话（仿真侧 demo 不受影响）'),
+                Shutdown(),
+            ],
+        )
+    )
+
     actions = []
     if value_of('enable_command_bridge').lower() == 'true':
         actions.append(command_bridge)
-    actions += [wait_ready, start_route]
+    actions += [wait_ready, start_route, close_on_finish]
     return actions
 
 
@@ -203,9 +219,11 @@ def generate_launch_description():
         DeclareLaunchArgument('report_file', default_value='/tmp/uav_offline_sim/action_report.jsonl',
                               description='离线上报报文落盘路径'),
         DeclareLaunchArgument('max_wait', default_value='0',
-                              description='航线最长等待秒数，0=不限'),
+                              description='航线最长等待秒数，0=不限；超时以退出码 3 结束（同样会关闭会话），'
+                                          '用于兜底“降落结果一直不确认”的卡死场景'),
         DeclareLaunchArgument('exit_on_finish', default_value='true',
-                              description='航线结束后是否退出调度节点'),
+                              description='航线结束后是否退出调度节点；true 时本启动会话随之整体退出'
+                                          '（false 仅调试用，会让会话一直挂着）'),
         DeclareLaunchArgument('enable_command_bridge', default_value='true',
                               description='是否启动 /uav_command 命令桥（验证返航受阻->迫降分支）'),
         DeclareLaunchArgument('dry_run', default_value='false',

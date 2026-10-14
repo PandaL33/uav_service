@@ -533,6 +533,73 @@ def wait_until_task_finished(task_manager, timeout: float = 0.0) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------------------
+# 结束判定：离线测试要能当回归用，“假通过”比不通过更糟
+# --------------------------------------------------------------------------------------
+
+TASK_PROGRESS_NAME = {0: 'STARTED', 1: 'IN_PROGRESS', 2: 'COMPLETED', 3: 'ABORTED', 4: 'CANCELED'}
+
+
+def _last_report(mqtt_client, cmd: str) -> Optional[Dict[str, Any]]:
+    """取 SimMqttClient 里最后一条指定 cmd 的上报报文（Ack / ActionReport）。"""
+    for _, data in reversed(list(getattr(mqtt_client, 'published', []) or [])):
+        if isinstance(data, dict) and data.get('cmd') == cmd:
+            return data
+    return None
+
+
+def wait_task_accepted(task_manager, timeout: float = 5.0) -> Tuple[bool, str]:
+    """确认在线链路真的收下了任务：先有 Ack(200)，再看到执行痕迹。
+
+    必须查的原因：process_cruise_task 没有返回值，任务被在线校验拒绝时
+    is_executing 从未置真，wait_until_task_finished 会“秒过”并被当成正常完成退出。
+    """
+    client = task_manager.mqtt_client
+    deadline = time.time() + timeout
+    ack = None
+    while True:
+        ack = _last_report(client, 'Ack')       # 先查一次，避免条件把首轮整个跳过
+        if ack or not rclpy_ok() or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    if not ack:
+        return False, '下发后 %.0fs 内没有任何 Ack 上报（命令没进入分发）' % timeout
+    status = ack.get('status')
+    if status != 200:
+        return False, '在线校验拒绝: status=%s error=%s' % (status, ack.get('error'))
+
+    deadline = time.time() + timeout
+    while True:
+        if task_manager.is_executing or _last_report(client, 'ActionReport'):
+            return True, 'Ack=200，任务已进入执行'
+        if not rclpy_ok() or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    return False, 'Ack=200 但既未 is_executing 也无 ActionReport，任务实际未启动'
+
+
+def final_exit_code(task_manager) -> int:
+    """按最后一条 ActionReport 的 taskProgress 定退出码：2=完成->0，3/4=中断/取消->7。
+
+    在线的正常成功路径末尾会上报 COMPLETED(2)，异常/返航/迫降分支上报 ABORTED(3)。
+    """
+    rep = _last_report(task_manager.mqtt_client, 'ActionReport')
+    if not rep:
+        logger.error('全程没有任何 ActionReport 上报，按失败退出')
+        return 7
+    body = rep.get('body') if isinstance(rep.get('body'), dict) else {}
+    progress = body.get('taskProgress')
+    name = TASK_PROGRESS_NAME.get(progress, '未知(%r)' % progress)
+    logger.info('终态上报: taskProgress=%s(%s) message=%s', progress, name, body.get('message'))
+    if progress == 2:
+        return 0
+    if progress in (3, 4):
+        logger.error('任务未正常完成: %s (%s)', name, body.get('message'))
+        return 7
+    logger.warning('终态为 %s（非 COMPLETED），退出码仍记 0，请结合上报文件确认', name)
+    return 0
+
+
 def rclpy_ok() -> bool:
     import rclpy
     return rclpy.ok()
@@ -560,9 +627,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--pose-frame-id', default='map',
                         help='喂给在线回调的坐标系名（与在线一致用 map）')
     parser.add_argument('--max-wait', type=float, default=0.0,
-                        help='航线最长等待秒数，0=不限（超时不停机，仅告警）')
+                        help='航线最长等待秒数，0=不限；超时则退出码 3 结束（配合 --exit-on-finish '
+                             '关闭会话），用于兜底降落结果一直不确认的卡死场景')
     parser.add_argument('--exit-on-finish', default='true', choices=['true', 'false'],
-                        help='航线结束后是否退出节点')
+                        help='航线结束后是否退出节点（默认 true；启动文件会据此收掉整个会话）')
     parser.add_argument('--remap', action='append', default=[], metavar='FROM:=TO',
                         help='话题重映射（仿真载具带命名空间时用，可重复）。'
                              '例: --remap /fmu/in/vehicle_command:=/x500_depth_0/fmu/in/vehicle_command')
@@ -689,11 +757,18 @@ def main() -> int:
         # 与在线完全一致的入口：走命令分发 -> 校验 -> 线程编排
         task_manager.process_cruise_task(message_data)
 
-        if not wait_until_task_finished(task_manager, timeout=args.max_wait):
-            exit_code = 3
+        accepted, reason = wait_task_accepted(task_manager)
+        if not accepted:
+            logger.error('任务受理检查不通过: %s', reason)
+            exit_code = 6
         else:
-            logger.info('航线任务结束，上报统计: %s 条（文件: %s）',
-                        len(task_manager.mqtt_client.published), args.report_file)
+            logger.info('任务受理检查通过: %s', reason)
+            if not wait_until_task_finished(task_manager, timeout=args.max_wait):
+                exit_code = 3      # 超时未结束（--max-wait 兜底），退出码 3
+            else:
+                logger.info('航线任务结束，上报统计: %s 条（文件: %s）',
+                            len(task_manager.mqtt_client.published), args.report_file)
+                exit_code = final_exit_code(task_manager)
     except KeyboardInterrupt:
         logger.warning('收到中断信号')
         if task_manager is not None and task_manager.is_executing:
