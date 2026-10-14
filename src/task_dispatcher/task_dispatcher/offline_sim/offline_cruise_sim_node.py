@@ -605,6 +605,86 @@ def rclpy_ok() -> bool:
     return rclpy.ok()
 
 
+def make_platform_command_callback(task_manager):
+    """生成平台即时飞控指令的话题回调。
+
+    离线没有 MQTT，外部直接向注入话题 pub 一个字符串枚举（std_msgs/String），
+    这里把它包装成与云端下发完全一致的报文（cmd=UAVCOMMAND + body.command），
+    喂给在线同一个 `process_uav_command` 入口。
+    """
+
+    def on_platform_command(msg) -> None:
+        raw = (msg.data or '').strip()
+        if not raw:
+            logger.warning('[平台指令] 空内容，忽略（合法指令见 commands.txt）')
+            return
+        message_data = {
+            'sn': 'SIM-UAV-00001',
+            'ver': '1.0',
+            'seq': str(uuid.uuid4()).replace('-', ''),
+            'type': 1,
+            'ts': int(time.time() * 1000),
+            'cmd': 'UAVCOMMAND',
+            'body': {'command': raw, 'actionId': f'sim_cmd_{raw}_{int(time.time())}'},
+        }
+        logger.info('[平台指令] 收到 "%s" -> process_uav_command', raw)
+        try:
+            task_manager.process_uav_command(message_data)
+        except Exception as exc:
+            logger.error('[平台指令] 执行异常: %s', exc)
+
+    return on_platform_command
+
+
+def wait_instant_commands_idle(task_manager) -> None:
+    """等话题注入的即时飞控指令执行完（执行线程收尾时把 instant_cmd 置回 None），
+    它的终态上报才是本轮离线测试的真正结论。"""
+    if getattr(task_manager, 'instant_cmd', None) is None:
+        return
+    logger.info('有即时指令在飞（%s），等待其执行完成…', task_manager.instant_cmd)
+    while getattr(task_manager, 'instant_cmd', None) is not None and rclpy_ok():
+        time.sleep(0.5)
+    logger.info('即时指令已全部结束')
+
+
+COMMANDS_DOC_FILE = os.path.join(THIS_DIR, 'commands.txt')
+
+
+def write_commands_doc(cmd_topic: str) -> str:
+    """把测试用的 ros2 topic pub 指令清单写到模块旁边的 commands.txt，可直接复制执行。"""
+    pub = "ros2 topic pub --once {} std_msgs/msg/String \"{{data: '{}'}}\""
+    content = '\n'.join([
+        '离线仿真：平台即时飞控指令测试命令（本文件由 offline_cruise_sim_node.py 启动时生成）',
+        '说明: 航线任务受理之后再发；同一时刻只允许一条即时指令在飞。',
+        '',
+        '# 悬停：停规划且不再发目标点，原地保持',
+        pub.format(cmd_topic, 'HOVER'),
+        '',
+        '# 原地降落：先 /stop_planning 交回控制权，再 PX4 原生 LAND',
+        pub.format(cmd_topic, 'LAND'),
+        '',
+        '# 直线返航：planner 先自主规划到 (0,0,1)，到达后发 (0,0,0) 降落',
+        pub.format(cmd_topic, 'RTL'),
+        '',
+        '# 沿线返航：按已到达航点倒序退回（yaw 反转 180°），末段直线返航',
+        pub.format(cmd_topic, 'RTL_ROUTE'),
+        '',
+        '# 迫降：与原地降落同链路（应急语义）',
+        pub.format(cmd_topic, 'EMERGENCY_LAND'),
+        '',
+        '# 也支持中文/别名直接下发，例如:',
+        pub.format(cmd_topic, '沿线返航'),
+        '',
+        '# 回执: Ack=受理(见上报话题落盘)，终态看 ActionReport taskProgress 2完成/3中断/4取消',
+    ]) + '\n'
+    try:
+        with open(COMMANDS_DOC_FILE, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+    except OSError as exc:
+        logger.warning('写 %s 失败: %s', COMMANDS_DOC_FILE, exc)
+    return COMMANDS_DOC_FILE
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='仿真离线航线测试（复用在线任务调度流程）')
     parser.add_argument('--route', required=True,
@@ -631,6 +711,9 @@ def parse_args() -> argparse.Namespace:
                              '关闭会话），用于兜底降落结果一直不确认的卡死场景')
     parser.add_argument('--exit-on-finish', default='true', choices=['true', 'false'],
                         help='航线结束后是否退出节点（默认 true；启动文件会据此收掉整个会话）')
+    parser.add_argument('--platform-cmd-topic', default='/offline_sim/platform_command',
+                        help='平台即时飞控指令注入话题（std_msgs/String，data=指令枚举，外部用 '
+                             'ros2 topic pub 下发；测试指令清单见同目录 commands.txt）')
     parser.add_argument('--remap', action='append', default=[], metavar='FROM:=TO',
                         help='话题重映射（仿真载具带命名空间时用，可重复）。'
                              '例: --remap /fmu/in/vehicle_command:=/x500_depth_0/fmu/in/vehicle_command')
@@ -754,6 +837,14 @@ def main() -> int:
         else:
             logger.info('位姿来源=外部 /pcl_pose（--feed-odom-pose false）')
 
+        # 平台即时飞控指令注入：外部 ros2 topic pub 一个字符串枚举即可
+        # （包装成与云端同构的报文后，走在线同一个 process_uav_command 入口）
+        from std_msgs.msg import String
+        node.create_subscription(String, args.platform_cmd_topic,
+                                 make_platform_command_callback(task_manager), 10)
+        topics_doc = write_commands_doc(args.platform_cmd_topic)
+        logger.info('即时指令注入话题: %s（测试用 pub 指令见 %s）', args.platform_cmd_topic, topics_doc)
+
         # 与在线完全一致的入口：走命令分发 -> 校验 -> 线程编排
         task_manager.process_cruise_task(message_data)
 
@@ -763,7 +854,10 @@ def main() -> int:
             exit_code = 6
         else:
             logger.info('任务受理检查通过: %s', reason)
-            if not wait_until_task_finished(task_manager, timeout=args.max_wait):
+            finished = wait_until_task_finished(task_manager, timeout=args.max_wait)
+            # 若期间有话题注入的即时指令在飞：等它跑完再定退出码
+            wait_instant_commands_idle(task_manager)
+            if not finished:
                 exit_code = 3      # 超时未结束（--max-wait 兜底），退出码 3
             else:
                 logger.info('航线任务结束，上报统计: %s 条（文件: %s）',

@@ -11,6 +11,9 @@
        waypoints_3_3.json，无需再传 route_file）：
          ros2 launch uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
        换航线：route_file:=<绝对路径或裸文件名>；只看报文不真飞：追加 dry_run:=true
+       航线途中注入平台即时飞控指令（模拟 MQTT 下发，另开一个终端 pub 字符串枚举即可）：
+         ros2 topic pub --once /offline_sim/platform_command std_msgs/msg/String "{data: 'RTL_ROUTE'}"
+       测试用的完整 pub 指令清单在启动时生成到 task_dispatcher/offline_sim/commands.txt
 
 本启动文件包含 2 个进程 + 1 个就绪门（航线进程退出后会话自动结束）
     - sim_uav_command_bridge   : /uav_command(LAND/RTL/...) -> multirotor_communication 的 XTD2Cmd 服务
