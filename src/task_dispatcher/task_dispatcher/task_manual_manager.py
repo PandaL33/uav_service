@@ -380,8 +380,9 @@ def parse_arguments():
                        help='文件类型，如: pcd, jpg, mp4')
     
     # upload-pcd 专用参数
-    parser.add_argument('--pcd-file', type=str, default='/home/cat/slam_data/pcd/test.pcd',
-                       help='点云文件路径，默认: /home/cat/slam_data/pcd/test.pcd')
+    parser.add_argument('--pcd-file', type=str,
+                       default=f"{os.path.expanduser('~')}/slam_data/pcd/test.pcd",
+                       help='点云文件路径')
     parser.add_argument('--max-retries', type=int, default=1,
                        help='最大重试次数，默认: 1')
     

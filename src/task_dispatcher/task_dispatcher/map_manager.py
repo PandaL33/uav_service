@@ -83,10 +83,10 @@ class MapManager:
         # 设置地图文件夹路径
         if map_folder is None:
             # 默认使用当前用户目录下的maps文件夹
-            self.map_folder = os.path.expanduser('/home/cat/slam_data/grid_map')
+            self.map_folder = f"{os.path.expanduser('~')}/slam_data/grid_map"
         else:
             self.map_folder = map_folder
-        self.pcd_map_folder = '/home/cat/slam_data/3d_map'
+        self.pcd_map_folder = f"{os.path.expanduser('~')}/slam_data/3d_map"
         
         # 确保地图文件夹存在
         if not os.path.exists(self.map_folder):
@@ -817,13 +817,13 @@ class MapManager:
             # result = subprocess.run(map_save_cmd, shell=True, check=True, capture_output=True, text=True, timeout=30)
             # logger.info(f'地图保存成功: {result.stdout}')
             # 保存地图成功后，将地图上传到文件服务器
-            # 从/home/cat/slam_data/map_10.png读取base64编码的图像数据
             # 读取图像文件并获取base64编码
-            with open('/home/cat/slam_data/map.png', 'rb') as f:
+            map_image_path = f"{os.path.expanduser('~')}/slam_data/map.png"
+            with open(map_image_path, 'rb') as f:
                 map_image_base64 = base64.b64encode(f.read()).decode('utf-8')
             
             # 获取图像宽高
-            with Image.open('/home/cat/slam_data/map.png') as img:
+            with Image.open(map_image_path) as img:
                 map_width, map_height = img.size
             logger.info(f'获取地图图像宽高成功: {map_width}x{map_height}')
 

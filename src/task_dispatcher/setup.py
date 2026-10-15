@@ -14,6 +14,17 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
          glob('launch/*.launch.py')),
+        # 端点覆盖加载器（endpoint_config.py）与航点样例随包安装
+        (os.path.join('share', package_name, 'launch'),
+         glob('launch/endpoint_config.py')),
+        (os.path.join('share', package_name, 'launch'),
+         glob('launch/*.json')),
+        # 仿真适配件（sim_support/离线节点/桥脚本/示例航线）：
+        # 让 launch/offline_route_sim 与 launch/online_sim_control 支持按包名启动
+        (os.path.join('share', package_name, 'offline_sim'),
+         glob('task_dispatcher/offline_sim/*.py')),
+        (os.path.join('share', package_name, 'offline_sim', 'routes'),
+         glob('task_dispatcher/offline_sim/routes/*.json')),
         (os.path.join('lib', package_name), glob('task_dispatcher/*.py')),
     ],
     install_requires=['setuptools', 'paho-mqtt', 'requests'], # 添加requests库依赖

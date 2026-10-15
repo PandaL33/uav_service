@@ -55,5 +55,5 @@ def convert_to_h264(input_file, output_file=None, remove_audio=False):
 
 # --- 使用示例 ---
 if __name__ == "__main__":
-    input_video = "/home/cat/uav_service/rtsp/1.mp4"  # 你的源文件
+    input_video = f"{os.path.expanduser('~')}/uav_service/rtsp/1.mp4"  # 你的源文件
     convert_to_h264(input_video)

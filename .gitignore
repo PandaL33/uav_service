@@ -14,3 +14,5 @@ uav_service/src/task_dispatcher/task_dispatcher/persisted_point_clouds/*.pcd
 src/task_dispatcher/task_dispatcher/persisted_point_clouds/*.pcd
 # 离线会话启动时生成的测试指令清单（内容由节点实时写出，不入库）
 src/task_dispatcher/task_dispatcher/offline_sim/commands.txt
+# 端点/凭证本地覆盖（MQTT 地址与密码等，严禁入库；格式见 launch/endpoint_config.py 头注释）
+endpoint.local.json

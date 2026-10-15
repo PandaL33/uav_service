@@ -9,7 +9,8 @@
          bash uav_service/scripts/setup_offline_sim_env.sh
     3. 起本文件，启动后会等规划器就绪 -> 立刻按航点执行航线（默认写死读本目录旁的
        waypoints_3_3.json，无需再传 route_file）：
-         ros2 launch uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
+         ros2 launch task_dispatcher offline_route_sim.launch.py
+       （需 colcon 构建过 task_dispatcher；直接给本文件路径启动同样有效）
        换航线：route_file:=<绝对路径或裸文件名>；只看报文不真飞：追加 dry_run:=true
        航线途中注入平台即时飞控指令（模拟 MQTT 下发，另开一个终端 pub 字符串枚举即可）：
          ros2 topic pub --once /offline_sim/platform_command std_msgs/msg/String "{data: 'RTL_ROUTE'}"
@@ -37,6 +38,7 @@
 """
 
 import os
+import sys
 
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction,
@@ -44,22 +46,26 @@ from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo, Opaq
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 
-LAUNCH_DIR = os.path.dirname(os.path.abspath(__file__))
+LAUNCH_DIR = os.path.dirname(os.path.realpath(__file__))   # symlink-install 时解析回源树
 # launch -> task_dispatcher -> src -> uav_service -> <repo>
 REPO_ROOT = os.path.abspath(os.path.join(LAUNCH_DIR, '..', '..', '..', '..'))
-# 离线仿真工具已收进包内：.../task_dispatcher/task_dispatcher/offline_sim
-OFFLINE_DIR = os.path.normpath(os.path.join(LAUNCH_DIR, '..', 'task_dispatcher', 'offline_sim'))
 
-# 在线代码以绝对名使用的飞控话题：仿真里需要加载具命名空间前缀
-ABSOLUTE_FMU_TOPICS = [
-    '/fmu/in/vehicle_command',
-    '/fmu/out/vehicle_status',
-    '/fmu/out/battery_status',
-    '/fmu/out/failsafe_flags',
-    '/fmu/out/vehicle_global_position',
-    '/fmu/out/vehicle_local_position',
-    '/fmu/out/vehicle_attitude',
-]
+
+def _find_offline_dir() -> str:
+    """offline_sim 定位：源树布局优先；copy 安装后在 share/task_dispatcher/offline_sim，
+    两种布局都能找到，支持 `ros2 launch task_dispatcher offline_route_sim.launch.py`。"""
+    for cand in (os.path.normpath(os.path.join(LAUNCH_DIR, '..', 'task_dispatcher', 'offline_sim')),
+                 os.path.normpath(os.path.join(LAUNCH_DIR, '..', 'offline_sim'))):
+        if os.path.isfile(os.path.join(cand, 'sim_support.py')):
+            return cand
+    raise FileNotFoundError('找不到 offline_sim/sim_support.py（launch 目录: %s）' % LAUNCH_DIR)
+
+
+OFFLINE_DIR = _find_offline_dir()
+# 话题/命名空间/重映射表的单一事实来源（与在线仿真启动文件 online_sim_control.launch.py 同一份）
+if OFFLINE_DIR not in sys.path:
+    sys.path.insert(0, OFFLINE_DIR)
+import sim_support  # noqa: E402
 
 
 def _resolve_route(name: str) -> str:
@@ -75,8 +81,8 @@ def _resolve_route(name: str) -> str:
 
 def _default_route() -> str:
     """默认航线：写死 launch 目录旁的 waypoints_3_3.json（PCD 规划页导出）。"""
-    # return _resolve_route('waypoints_9.json')
-    return _resolve_route('waypoints_3_3.json')
+    return _resolve_route('waypoints_rk_garden.json')
+    # return _resolve_route('waypoints_3_3.json')
 
 
 def _default_python() -> str:
@@ -90,21 +96,17 @@ def launch_setup(context, *args, **kwargs):
         return LaunchConfiguration(name).perform(context)
 
     namespace = value_of('namespace')
-    base_ns = namespace.strip('/')
-    prefix = f'/{base_ns}' if base_ns else ''
+    prefix = sim_support.ns_prefix(namespace)
 
     use_sim_time = value_of('use_sim_time')
     route_file = _resolve_route(value_of('route_file'))
 
-    truth_odom = value_of('truth_odom_topic') or (f'{prefix}/odometry' if prefix else '/odometry')
-    px4_odom = f'{prefix}/fmu/out/vehicle_odometry' if prefix else '/fmu/out/vehicle_odometry'
-    cmd_service = f'/xtdrone2/{base_ns}/cmd' if base_ns else '/xtdrone2/cmd'
+    truth_odom = sim_support.truth_odom_topic(namespace, value_of('truth_odom_topic'))
+    px4_odom = sim_support.px4_odom_topic(namespace)
+    cmd_service = sim_support.cmd_service_name(namespace)
     python_bin = value_of('python_bin') or _default_python()
 
-    remaps = []
-    if prefix:
-        for topic in ABSOLUTE_FMU_TOPICS:
-            remaps += ['--remap', f'{topic}:={prefix}{topic}']
+    remaps = sim_support.fmu_remap_cli_args(namespace)
 
     # 1) 命令桥：让 _emergency_land 的 'LAND' 在仿真里真正生效（走 PX4 原生 LAND，不与规划器抢控制）
     command_bridge = ExecuteProcess(

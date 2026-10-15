@@ -1,3 +1,5 @@
+import os
+
 #ROBOT_TYPE = "default"
 #ROBOT_TYPE = "ffr"
 ROBOT_TYPE = "uav"
@@ -18,8 +20,8 @@ PTZ_USERNAME = "admin"
 PTZ_PASSWORD = "Lyq@2025"
 
 # 点云数据原始路径
-PCD_FILE_PATH = "/home/cat/slam_data/pcd/test.pcd"
-PCD_FILE_COMPRESS_PATH = "/home/cat/slam_data/pcd/test_compress.pcd"
+PCD_FILE_PATH = f"{os.path.expanduser('~')}/slam_data/pcd/test.pcd"
+PCD_FILE_COMPRESS_PATH = f"{os.path.expanduser('~')}/slam_data/pcd/test_compress.pcd"
 
 AUTH_CONFIG = {
     'USERNAME': 'robot-manage',
@@ -28,7 +30,7 @@ AUTH_CONFIG = {
 }
 
 # ================= 录制策略 =================
-RECORD_FILE_PATH = "/home/cat/slam_data/rtsp"
+RECORD_FILE_PATH = f"{os.path.expanduser('~')}/slam_data/rtsp"
 # 每个视频文件的时长 (单位: 秒)
 # 例如: 60 = 1分钟一个文件, 300 = 5分钟一个文件
 SEGMENT_DURATION = 300

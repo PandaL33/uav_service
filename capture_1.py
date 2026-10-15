@@ -114,8 +114,8 @@ def capture_and_compress(input_hint, output_image):
 
 if __name__ == "__main__":
     # 配置路径
-    target_file = "/home/cat/slam_data/pcd/test.pcd" 
-    output_img = "/home/cat/slam_data/pcd/map.png"
+    target_file = f"{os.path.expanduser('~')}/slam_data/pcd/test.pcd" 
+    output_img = f"{os.path.expanduser('~')}/slam_data/pcd/map.png"
     
     # 压缩配置
     # 对于 900 万点，Level 12 可能会产生较多点，如果还觉得慢或文件大，可尝试 10 或 11

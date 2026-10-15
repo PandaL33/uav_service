@@ -116,7 +116,8 @@ class RemoteControl:
             # 验证actName是否有效
             valid_act_names = ['stay', 'face', 'stand', 'walk', 'jump', 'stop', 
                                'record', 'snap', 'algo', 'forceStop', 'ptz',
-                               'drive', 'charge', 'takeoff', 'land', 'gpio',
+                               'drive', 'charge', 'takeoff', 'land', 'rtl', 'rtl_route',
+                                'hover', 'continue', 'gpio',
                                'cover_open', 'cover_close', 'putter_close', 'putter_open', 
                                'drone_open', 'drone_close', 'charge_open', 'charge_close',
                                'battery_activation']
@@ -137,10 +138,16 @@ class RemoteControl:
                 self.call_ffr_service(act_name, action_id, argv)
             else:
                 # 调用对应的ROS服务
+                self._active_message = message_data
                 self.call_robot_control_service(act_name, action_id, argv)  
             
             # 发送确认响应
-            self.send_ack_response(message_data, 200, 'ok')
+            # 飞行即时指令（hover/rtl/rtl_route/continue）已转交 cruise 管理器，
+            # 由其发送详细受理回执，此处跳过通用 ack 避免重复回执
+            if ROBOT_TYPE != 'ffr' and act_name in ('hover', 'rtl', 'rtl_route', 'continue'):
+                logger.info(f'{act_name} 已转交 cruise 管理器，由 cruise 发送受理回执')
+            else:
+                self.send_ack_response(message_data, 200, 'ok')
             
         except Exception as e:
             logger.error(f'处理RemoteControl命令时出错: {str(e)}')
@@ -310,6 +317,12 @@ class RemoteControl:
                 
                 # test
                 # self._call_uav_gpio(act_name, argv, 1)
+            elif act_name in ('hover', 'rtl', 'rtl_route', 'continue'):
+                # 平台即时飞控指令：悬停(暂停)/直线返航/沿线返航/续航。
+                # 这些底层 XTD2Cmd 服务不支持，统一路由到 cruise 管理器的
+                # process_uav_command 执行真正的飞控语义。
+                self._call_uav_flight_command(act_name, argv,
+                                              getattr(self, '_active_message', None))
             elif act_name == 'gpio':
                 level = argv.get('level', 0)
                 self._call_uav_gpio(act_name, argv, level)
@@ -341,6 +354,47 @@ class RemoteControl:
             logger.error('降落失败')
         
         # self.uav_command_sender.shutdown()
+    def _call_uav_flight_command(self, act_name, argv, message_data=None):
+        """处理平台即时飞控指令（悬停/直线返航/沿线返航/续航）。
+
+        底层 XTD2Cmd 服务不支持 RTL_ROUTE/CONTINUE，统一转交给
+        cruise_uav_task_manager.process_uav_command 执行真正的飞控语义。
+        """
+        act_name_to_kind = {
+            'hover': 'HOVER',
+            'rtl': 'RTL',
+            'rtl_route': 'RTL_ROUTE',
+            'continue': 'CONTINUE',
+        }
+        kind = act_name_to_kind.get(act_name)
+        if kind is None:
+            logger.error(f'不支持的飞控 actName: {act_name}')
+            return
+
+        cruise = getattr(self.node, 'cruise_uav_task_manager', None)
+        if cruise is None:
+            logger.error(f'cruise_uav_task_manager 不可用，无法执行 {kind}')
+            return
+
+        logger.info(f'收到{act_name}命令 -> 路由到 cruise 即时飞控指令 {kind}')
+        body = dict(argv or {})
+        body['command'] = kind
+        if isinstance(message_data, dict):
+            body.setdefault('actionId', message_data.get('body', {}).get('actionId', '') or message_data.get('seq', ''))
+            cruise.process_uav_command({
+                'sn': message_data.get('sn', ''),
+                'seq': message_data.get('seq', ''),
+                'cmd': 'UAVCOMMAND',
+                'body': body,
+            })
+        else:
+            # 无原始消息时只用默认字段，回执 sn/seq 由 cruise 按传入值组包
+            cruise.process_uav_command({
+                'sn': '',
+                'seq': '',
+                'cmd': 'UAVCOMMAND',
+                'body': body,
+            })
     def _call_uav_gpio(self, act_name, argv, level):
         """处理补光灯"""
         logger.info(f'收到{act_name}命令')

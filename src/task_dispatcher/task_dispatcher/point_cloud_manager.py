@@ -435,7 +435,7 @@ class PointCloudManager:
             # pcd = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.02, y_ratio=0.02, z_ratio=0.0)
             logger.info("开始执行点云文件截图")
             raster = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.0, y_ratio=0.0, z_ratio=0.35)
-            png_res, col_radar, row_radar = self.pcd_to_raster(raster, '/home/cat/slam_data/map.png')
+            png_res, col_radar, row_radar = self.pcd_to_raster(raster, f"{os.path.expanduser('~')}/slam_data/map.png")
             if png_res == False:
                 logger.error(f"点云文件截图失败,退出建图流程.")
                 return '', 0.0, 0.0
