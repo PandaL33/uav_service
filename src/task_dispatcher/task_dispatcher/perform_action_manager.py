@@ -11,7 +11,7 @@ import time
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import math
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 import tf_transformations
 from action_msgs.msg import GoalStatusArray, GoalStatus
 from task_dispatcher.ptz_control import PtzControl
@@ -27,7 +27,7 @@ class PerformActionManager:
     执行动作管理器，负责处理各种巡检任务动作
     """
     
-    def __init__(self, node, ptz_controller=None, topic_subscriber=None):
+    def __init__(self, node, ptz_controller=None, topic_subscriber=None, speed_topic_prefix=''):
         """
         初始化执行动作管理器
         
@@ -35,6 +35,7 @@ class PerformActionManager:
             node: ROS2节点实例
             ptz_controller: PTZ控制器实例
             topic_subscriber: ROS2主题订阅器实例
+            speed_topic_prefix: 速度话题前缀，默认 ''（即 /goal_vel_max 与 /goal_vel_max_ack）
         """
         self.node = node
         self.ptz_controller: Optional[PtzControl] = ptz_controller
@@ -50,6 +51,22 @@ class PerformActionManager:
         # 失效降级互通：发布 /mission_event（String+JSON，复用方案 §14 事件集与字段）
         self.mission_event_pub = self.node.create_publisher(String, "/mission_event", 10)
 
+        # ---- 逐航点实时调速 ----
+        # 请求 /goal_vel_max，planner 收到后用 /goal_vel_max_ack 回确认；
+        # 等不到 ack 时最多重发 3 次，仍无 ack 则乐观记录并继续（不阻塞任务）。
+        # 默认速度 2.0 m/s，与 planner manager/max_vel、网页面板三处保持一致。
+        self.speed_topic_prefix = speed_topic_prefix
+        self._default_speed = 2.0
+        self._speed_adopted = self._default_speed   # 已生效速度缓存（未变速则不再发）
+        self._speed_ack_value: Optional[float] = None
+        self._speed_ack_event = threading.Event()
+        self._speed_ack_retry = 3                    # 无 ack 时的最大重发次数
+        self._speed_ack_timeout = 0.3                # 单次等待 ack 超时(s)
+        self.speed_pub = self.node.create_publisher(
+            Float32, f"{self.speed_topic_prefix}/goal_vel_max", 10)
+        self.speed_ack_sub = self.node.create_subscription(
+            Float32, f"{self.speed_topic_prefix}/goal_vel_max_ack", self._on_speed_ack, 10)
+
         # 航点停滞判定参数（不简化，实际环境日飞，判据可配置）
         #   stall_time_s    : 连续无有效推进的秒数阈值，触发一次停滞判定
         #   stall_dist_min  : 单次判定期内必须至少推进的水平距离(m)，否则视为停滞
@@ -57,6 +74,7 @@ class PerformActionManager:
         self.waypoint_stall_time_s = 10.0         # 10s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
         self.waypoint_min_progress = 0.15         # 2s 内须推进 >= 0.15m，否则停滞计数+1
+        self._stall_reset_token = 0               # 编排层收到 planner 失效上报后递增，move 循环据此重新计时
 
         # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
         self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
@@ -173,6 +191,58 @@ class PerformActionManager:
             logger.exception(f"判断飞行状态时发生未知错误: {e}")
             return False
 
+    def _on_speed_ack(self, msg):
+        """planner 的速度确认回调：记录采纳值并唤醒等待方"""
+        try:
+            self._speed_ack_value = float(msg.data)
+        except (TypeError, ValueError):
+            self._speed_ack_value = None
+        self._speed_ack_event.set()
+
+    def _ensure_speed(self, pos: Dict[str, Any]):
+        """
+        按航点下发速度（仅在速度变化时发），并等待 planner 的 ack 确认。
+
+        规则：
+          - pos 无 speed 字段（返航/迫降/悬停等临时点）→ 不发，沿用上一航点速度；
+          - 与已生效速度差值 <= 1e-3 → 视为未变速，不发；
+          - 否则发布并等待 ack，最多重发 _speed_ack_retry 次；
+            收到任意 ack 即以 ack 携带的采纳值更新缓存；全部超时则乐观更新本地值并告警继续。
+        """
+        if not isinstance(pos, dict):
+            return
+        raw = pos.get('speed', None)
+        if raw is None:
+            # 未指定速度：不改不发，沿用上一航点速度
+            return
+
+        target = self.safe_float(raw, self._default_speed)
+        if abs(target - self._speed_adopted) <= 1e-3:
+            # 速度未变，无需下发
+            return
+
+        for attempt in range(1, self._speed_ack_retry + 1):
+            self._speed_ack_value = None
+            self._speed_ack_event.clear()
+
+            msg = Float32()
+            msg.data = float(target)
+            self.speed_pub.publish(msg)
+            logger.info(f'下发速度请求: {target} m/s (第{attempt}次), 当前已生效={self._speed_adopted} m/s')
+
+            if self._speed_ack_event.wait(self._speed_ack_timeout):
+                adopted = self._speed_ack_value if self._speed_ack_value is not None else target
+                self._speed_adopted = adopted
+                logger.info(f'速度请求已确认: 请求={target} m/s, planner 采纳={adopted} m/s')
+                return
+
+            logger.warning(f'等待速度 ack 超时 ({attempt}/{self._speed_ack_retry}), target={target} m/s')
+
+        # 重发耗尽仍无 ack：乐观记录本地值，继续执行不阻塞任务
+        self._speed_adopted = target
+        logger.warning(f'速度请求未收到 ack，已重发 {self._speed_ack_retry} 次后放弃，'
+                       f'本地乐观记录为 {target} m/s（实际可能未生效）')
+
     def _publish_mission_event(self, event: str, **fields):
         """
         发布 /mission_event（String+JSON）。事件名与字段按完整失效降级方案 §14 对齐：
@@ -204,6 +274,11 @@ class PerformActionManager:
             return math.hypot(rx - tx, ry - ty)
         except Exception:
             return None
+
+    def reset_stall_timer(self):
+        """编排层收到 planner 的 GOAL_UNREACHABLE 上报并计数后调用：
+        使正在运行的 move 循环停滞计时清零、重新起算，避免同一失效被 STALLED 双计。"""
+        self._stall_reset_token += 1
 
     def _is_airborne(self) -> bool:
         """飞机是否已起飞（解锁且 takeoff_time>0）。起桨/离地前返回 False。"""
@@ -269,7 +344,10 @@ class PerformActionManager:
             z = pos['z']
             
             logger.info(f'执行飞行动作: 目标坐标点(x={x}, y={y}, z={z}, d={d})')
-            
+
+            # 下发本航点速度（仅在速度变化时发，并等待 planner ack）
+            self._ensure_speed(pos)
+
             # 发送目标点给导航服务
             while True:
                 if self.stop_action:
@@ -314,6 +392,7 @@ class PerformActionManager:
                 st_last_dist = self._get_current_target_dist(x, y, z)
                 st_last_sample_t = time.time()
                 st_pause_logged = False       # 起飞前暂停判定的提示只打一次
+                st_reset_token = self._stall_reset_token  # 外部失效事件的重置令牌
                 while True:
                     self.goal_pose_pub_3d.publish(pose_msg)
 
@@ -345,6 +424,17 @@ class PerformActionManager:
                             st_pause_logged = True
                         time.sleep(0.2)
                         continue
+
+                    # ---- 外部失效事件重置计时 ----
+                    # 编排层收到 planner 的 GOAL_UNREACHABLE（OBSTACLE/PLAN_FAILED/REPLAN_FAILED）
+                    # 并已计入不可达计数后，调用 reset_stall_timer() 让停滞计时重新起算，
+                    # 避免同一失效事件在 10s 后又被 STALLED 重复计数。
+                    if self._stall_reset_token != st_reset_token:
+                        st_reset_token = self._stall_reset_token
+                        st_stall_accum = 0.0
+                        st_last_dist = self._get_current_target_dist(x, y, z)
+                        st_last_sample_t = time.time()
+                        logger.info(f'收到 planner 失效上报已计数，停滞判定重新计时: 目标(x={x}, y={y}, z={z})')
 
                     # ---- 停滞 watchdog ----
                     now_t = time.time()
@@ -949,10 +1039,12 @@ class PerformActionManager:
 
             # 等待服务可用（复用 __init__ 中创建的客户端）
             if not self.move_client.wait_for_service(timeout_sec=3.0):
-                logger.error('移动服务不可用')
+                # 降级：/rkbot/move 缺失时不阻断任务（如 stay 悬停由规划器自身保位），
+                # 仅告警并以 success 继续，避免「悬停动作」因缺服务直接失败
+                logger.warning('移动服务 /rkbot/move 不可用，跳过停止移动指令（降级继续）')
                 return {
-                    'success': False,
-                    'message': '移动服务不可用'
+                    'success': True,
+                    'message': '移动服务不可用，已跳过停止移动指令（降级继续）'
                 }
 
             # 准备请求
