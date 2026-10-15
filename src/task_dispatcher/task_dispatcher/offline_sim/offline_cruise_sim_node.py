@@ -291,10 +291,12 @@ class SimSubprocess:
 
 
 def _pos_of(item: Dict[str, Any], idx: int) -> Tuple[Dict[str, float], bool]:
-    """把一条航点记录归一化成在线 pos 结构 {x,y,z,d}。
+    """把一条航点记录归一化成在线 pos 结构 {x,y,z,d[,key]}。
 
     返回 (pos, 是否显式给了方向)。方向支持 d/yaw/heading 三种键名（弧度）；
     没给就不写 d，交给 compute_route_yaws 按航线几何补上。
+    key（关键点，规划页打钩导出）原样带入 pos，供“沿线返航”只回溯关键点。
+    speed（逐航点速度，m/s）原样带入 pos；未给则该航点不改速度（沿用上一航点速度）。
     """
     explicit = any(item.get(k) is not None for k in ('d', 'yaw', 'heading'))
     pos: Dict[str, float] = {
@@ -304,6 +306,10 @@ def _pos_of(item: Dict[str, Any], idx: int) -> Tuple[Dict[str, float], bool]:
     }
     if explicit:
         pos['d'] = float(item.get('d', item.get('yaw', item.get('heading'))))
+    if item.get('key'):
+        pos['key'] = True
+    if item.get('speed') is not None:
+        pos['speed'] = float(item.get('speed'))
     if pos['z'] <= 0.0:
         logger.warning('航点 %s 高度 z=%s <= 0，仿真中会被视为地面/下降目标，请确认', idx, pos['z'])
     return pos, explicit
@@ -388,12 +394,12 @@ def load_route_file(path: str, yaw_mode: str = 'smooth',
         source = '完整 cruises 任务配置'
     elif 'waypoints' in raw:
         source = 'web 航点规划页导出(waypoints)'
-        legs: List[Dict[str, Any]] = []
+        cruise_items: List[Dict[str, Any]] = []
         for i, w in enumerate(raw['waypoints']):
             if not isinstance(w, dict):
                 raise ValueError(f'waypoints[{i}] 必须是对象')
             pos, explicit = _pos_of(w, i + 1)
-            legs.append({
+            cruise_items.append({
                 'idx': int(w.get('index', w.get('idx', i + 1))),
                 'pos': pos,
                 '_explicit_yaw': explicit,
@@ -401,7 +407,7 @@ def load_route_file(path: str, yaw_mode: str = 'smooth',
                 'endActions': w.get('endActions', []),
             })
         body = dict(raw)
-        body['cruises'] = legs
+        body['cruises'] = cruise_items
     else:
         raise ValueError('无法识别的航点配置：需要 waypoints / cruises / body 之一')
 
@@ -452,6 +458,8 @@ def load_route_file(path: str, yaw_mode: str = 'smooth',
             explicit = True
         else:
             pos['d'] = 0.0
+        if cruise.get('key'):
+            pos['key'] = True      # cruises 形态的关键点标记可能写在航点项一级
         cruise['pos'] = pos
         points.append(pos)
         if not explicit:
@@ -657,23 +665,24 @@ def write_commands_doc(cmd_topic: str) -> str:
         '离线仿真：平台即时飞控指令测试命令（本文件由 offline_cruise_sim_node.py 启动时生成）',
         '说明: 航线任务受理之后再发；同一时刻只允许一条即时指令在飞。',
         '',
-        '# 悬停：停规划且不再发目标点，原地保持',
+        '# 悬停/暂停：在飞任务停靠在当前航点（任务状态保留），无任务则单纯原地悬停',
         pub.format(cmd_topic, 'HOVER'),
         '',
-        '# 原地降落：先 /stop_planning 交回控制权，再 PX4 原生 LAND',
+        '# 续航：恢复被悬停暂停的任务，从未完成的航点继续飞（无暂停任务时回 400）',
+        pub.format(cmd_topic, 'CONTINUE'),
+        '',
+        '# 降落（即时指令触发的降落一律按迫降处理）：先 /stop_planning 交回控制权，再 PX4 原生 LAND',
         pub.format(cmd_topic, 'LAND'),
         '',
         '# 直线返航：planner 先自主规划到 (0,0,1)，到达后发 (0,0,0) 降落',
         pub.format(cmd_topic, 'RTL'),
         '',
-        '# 沿线返航：按已到达航点倒序退回（yaw 反转 180°），末段直线返航',
+        '# 沿线返航：只按已到达的“关键点”(pos.key 打钩)倒序回溯，yaw 反转 180°；未标记关键点则全量倒序',
         pub.format(cmd_topic, 'RTL_ROUTE'),
-        '',
-        '# 迫降：与原地降落同链路（应急语义）',
-        pub.format(cmd_topic, 'EMERGENCY_LAND'),
         '',
         '# 也支持中文/别名直接下发，例如:',
         pub.format(cmd_topic, '沿线返航'),
+        pub.format(cmd_topic, '迫降'),
         '',
         '# 回执: Ack=受理(见上报话题落盘)，终态看 ActionReport taskProgress 2完成/3中断/4取消',
     ]) + '\n'
@@ -770,9 +779,10 @@ def main() -> int:
                 source, os.path.basename(route_path), len(body['cruises']), task_id)
     for cruise in body['cruises']:
         pos = cruise['pos']
-        logger.info('  航点 idx=%s (x=%.2f, y=%.2f, z=%.2f) d=%.3f rad (%.1f°) endActions=%d',
+        logger.info('  航点 idx=%s (x=%.2f, y=%.2f, z=%.2f) d=%.3f rad (%.1f°) endActions=%d%s',
                     cruise.get('idx'), pos['x'], pos['y'], pos['z'], pos['d'],
-                    math.degrees(pos['d']), len(cruise.get('endActions', [])))
+                    math.degrees(pos['d']), len(cruise.get('endActions', [])),
+                    '  ★关键点' if pos.get('key') else '')
 
     if args.dry_run:
         logger.info('[dry-run] 报文如下：\n%s', json.dumps(message_data, ensure_ascii=False, indent=2))

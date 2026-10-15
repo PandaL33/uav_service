@@ -156,7 +156,7 @@ class CruiseUavTaskManager:
         self.waypoint_max_retry = 3        # 同一航点最多重试 3 次
         self.waypoint_consec_limit = 2     # 连续 2 个航点不可达 → 返航
 
-        # ===== 平台即时飞控指令（原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降）=====
+        # ===== 平台即时飞控指令（悬停(暂停) / 续航 / 降落（即迫降）/ 直线返航 / 沿线返航）=====
         # ego_planner 的控制入口：traj_server 收到 /stop_planning 会停止发送轨迹并清掉
         # 目标点与 SZD 状态（xtd2_traj_server.cpp stopPlanningCallback）。没新目标点时它
         # 改为持续发送“当前位置”设定点，即飞机原地悬停 —— 这是降落前必须先把控制权
@@ -164,14 +164,17 @@ class CruiseUavTaskManager:
         self.stop_planning_pub = self.node.create_publisher(Empty, "/stop_planning", 10)
         # 已成功到达的航点（“沿线返航”按此倒序退回）。只在新任务开始时清空，
         # reset_status() 不清 —— 否则停止任务后就找不到来路航点了。
-        self.visited_waypoints: List[Dict[str, float]] = []
+        self.visited_waypoints: List[Dict[str, Any]] = []
         # 即时指令互斥：同一时刻只跑一条，避免降落与返航互相抢控制权
         self.instant_cmd: Optional[str] = None
+        # HOVER 暂停标志：航线线程停在当前航点的停靠门等 CONTINUE 续航，
+        # 任务状态（task_id/cruises/visited_waypoints）原样保留
+        self.task_paused: bool = False
 
         logger.info('巡检任务管理器初始化完成')
 
     def _mission_event_callback(self, msg: String):
-        """订阅 /mission_event：接收 ego planner 的目标障碍上报，计入不可达判定。"""
+        """订阅 /mission_event：接收 ego planner 的不可达上报，计入不可达判定并重新计时。"""
         try:
             data = json.loads(msg.data)
             event = data.get('event')
@@ -179,14 +182,25 @@ class CruiseUavTaskManager:
             if event != 'GOAL_UNREACHABLE':
                 return
             reason = data.get('reason', '')
-            # 只消费 planner 侧 OBSTACLE；STALLED 已由 perform_action 返回值同步计入，避免双计
-            if source == 'planner' and reason == 'OBSTACLE':
+            # planner 侧三类不可达事件均为真失效，全部计入（3s 时间窗去重防双计）：
+            #   OBSTACLE      : 目标点落在膨胀障碍区，planner 直接拒绝该目标
+            #   PLAN_FAILED   : GEN_NEW_TRAJ 连续 3 次规划失败 → 急停悬停并清目标回 WAIT_TARGET
+            #   REPLAN_FAILED : REPLAN_TRAJ 连续 3 次重规划失败 → 急停悬停并清目标回 WAIT_TARGET
+            # STALLED 由 perform_action 返回值同步计入，此处不消费，避免双计。
+            if source == 'planner' and reason in ('OBSTACLE', 'PLAN_FAILED', 'REPLAN_FAILED'):
                 now = time.time()
+                counted = False
                 with self._lock:
                     if now - self.last_obstacle_ts >= self._unreachable_dedup_win:
                         self.last_obstacle_ts = now
                         self.same_point_retry += 1
-                        logger.warning(f"[mission_event] 收到 ego OBSTACLE 上报，同点重试={self.same_point_retry}")
+                        cnt = self.same_point_retry
+                        counted = True
+                if counted:
+                    # 本事件已计数：让 move 循环停滞计时重新起算，
+                    # 避免同一失效 10s 后又被 STALLED 重复计数
+                    self.perform_action_manager.reset_stall_timer()
+                    logger.warning(f"[mission_event] 收到 ego {reason} 上报，同点重试={cnt}")
         except Exception as e:
             logger.warning(f"解析 /mission_event 失败: {e}")
 
@@ -270,11 +284,25 @@ class CruiseUavTaskManager:
             flight_epoch=getattr(self, 'flight_epoch', 'NA'),
             consec_goals=self.consec_goals,
             trigger='RETURN')
+        # 返航两段式（与直线返航语义一致）：先发 (0,0,1) 回原点上方悬停点，
+        # 到达后再发 (0,0,0)（planner 进 ±0.5m 安全区自动切 SZD 降落），
+        # 避免直接发 (0,0,0) 让飞机在未知障碍的高度上贴地穿越
+        hover_pos = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'd': 0.0}
+        result = self.perform_action_manager.perform_action_walk_to_pos_3d(hover_pos)
+        if not result.get('success', False):
+            logger.error(f"[返航受阻] task={task_id} 去原点悬停点 (0,0,1) 不可达，触发迫降")
+            self._publish_mission_event(
+                'RETURN_BLOCKED',
+                goal_seq=self.goal_seq_counter,
+                flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+                reason='OBSTACLE_BLOCKED')
+            self._emergency_land(task_id)
+            return True
         origin_pos = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'd': 0.0}
         result = self.perform_action_manager.perform_action_walk_to_pos_3d(origin_pos)
         success = result.get('success', False)
         if not success:
-            logger.error(f"[返航受阻] task={task_id} 返航途中不可达，触发迫降")
+            logger.error(f"[返航受阻] task={task_id} 返航末段降落不可达，触发迫降")
             self._publish_mission_event(
                 'RETURN_BLOCKED',
                 goal_seq=self.goal_seq_counter,
@@ -297,25 +325,29 @@ class CruiseUavTaskManager:
             return False
 
     # ==================================================================================
-    # 平台即时飞控指令：原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降
+    # 平台即时飞控指令：悬停(暂停) / 续航 / 降落（即迫降）/ 直线返航 / 沿线返航
     #
     # 统一走同一条链路：先接管（停当前航点目标点发布）-> 停规划（/stop_planning 把控制权
     # 交回飞控）-> 再执行；回执分两级：Ack 只代表“已受理并接管”，落地/返航完成由
     # ActionReport 收尾（taskProgress 2=完成 3=中断）。
+    # 例外：HOVER 对在飞任务是“暂停”（可在航点原地恢复），CONTINUE 只解锁停靠门。
     # ==================================================================================
 
-    # 归一后的指令种类
-    UAV_COMMAND_KINDS = ('HOVER', 'LAND', 'EMERGENCY_LAND', 'RTL', 'RTL_ROUTE')
+    # 归一后的指令种类：即时指令里触发的降落都属迫降（任务外紧急落地），统一按 LAND 执行
+    UAV_COMMAND_KINDS = ('HOVER', 'CONTINUE', 'LAND', 'RTL', 'RTL_ROUTE')
 
     # 平台可能的多种写法（命令码与 body.command 都先过这张表）
     UAV_COMMAND_ALIASES = {
         'HOVER': 'HOVER', 'HOLD': 'HOVER', 'PAUSE': 'HOVER', 'SUSPEND': 'HOVER', '悬停': 'HOVER',
+        'CONTINUE': 'CONTINUE', 'CONTINUE_TASK': 'CONTINUE', 'CONTINUETASK': 'CONTINUE',
+        'RESUME': 'CONTINUE', 'RESUME_TASK': 'CONTINUE', 'RESUMETASK': 'CONTINUE',
+        '继续任务': 'CONTINUE', '恢复任务': 'CONTINUE', '继续': 'CONTINUE',
         'LAND': 'LAND', 'LANDING': 'LAND', 'DESCEND': 'LAND', '降落': 'LAND', '原地降落': 'LAND',
-        'EMERGENCY_LAND': 'EMERGENCY_LAND', 'FORCE_LAND': 'EMERGENCY_LAND', '迫降': 'EMERGENCY_LAND',
+        '迫降': 'LAND', 'FORCE_LAND': 'LAND', 'EMERGENCY_LAND': 'LAND', 'EMERGENCYLAND': 'LAND',
         'RTL': 'RTL', 'RTL_STRAIGHT': 'RTL', 'RETURN': 'RTL', 'RETURN_HOME': 'RTL',
         '返航': 'RTL', '直线返航': 'RTL',
-        'RTL_ROUTE': 'RTL_ROUTE', 'RTL_BY_WAYPOINTS': 'RTL_ROUTE', 'RETURN_ROUTE': 'RTL_ROUTE',
-        '沿线返航': 'RTL_ROUTE',
+        'RTL_ROUTE': 'RTL_ROUTE', 'RTLROUTE': 'RTL_ROUTE', 'RTL_BY_WAYPOINTS': 'RTL_ROUTE',
+        'RETURN_ROUTE': 'RTL_ROUTE', '沿线返航': 'RTL_ROUTE',
     }
 
     # 返航终点＝原点；z=0 会让 planner 在 ±0.5m 安全区内自动切 SZD 降落
@@ -353,11 +385,11 @@ class CruiseUavTaskManager:
         except (TypeError, ValueError):
             land_timeout = 60.0
         try:
-            route_max_legs = int(body.get('maxLegs', 0) or 0)
+            route_max_points = int(body.get('maxPoints', 0) or 0)
         except (TypeError, ValueError):
-            route_max_legs = 0
+            route_max_points = 0
         params = {'land_timeout': land_timeout if land_timeout > 0 else 60.0,
-                  'route_max_legs': max(0, route_max_legs)}
+                  'route_max_points': max(0, route_max_points)}
         return kind, action_id, params
 
     def process_uav_command(self, message_data):
@@ -375,48 +407,69 @@ class CruiseUavTaskManager:
             return
 
         with self._lock:
+            busy = None
+            reject = None
+            aborted_task = None
+            paused_task = None
             if self.instant_cmd is not None:
                 busy = self.instant_cmd
+            elif kind == 'CONTINUE' and not (self.task_paused and self.is_executing):
+                reject = 'no paused task to continue'
             else:
-                busy = None
                 self.instant_cmd = kind
-                aborted_task = self.current_task_id if self.is_executing else None
-                if aborted_task:
+                in_flight = self.is_executing and self.current_task_id is not None
+                if kind == 'HOVER' and in_flight:
+                    # 悬停=暂停：不清任务状态，航线线程在当前航点停靠，等 CONTINUE 续航
+                    paused_task = self.current_task_id
+                    self.task_paused = True
+                elif kind == 'CONTINUE':
+                    paused_task = self.current_task_id      # 执行体负责真正解开停靠门
+                elif in_flight:
+                    aborted_task = self.current_task_id
                     self.is_executing = False
                     self.current_task_id = None
                     self.cruises = []
+                    self.task_paused = False                # 暂停停靠中则唤醒线程使其退出
 
-        if busy:
-            logger.warning(f'[即时指令] 已有即时指令在执行({busy})，拒绝 {kind}')
-            self.send_ack_response(message_data, 400, f'another instant command in progress: {busy}', {})
+        if busy or reject:
+            reason = f'another instant command in progress: {busy}' if busy else reject
+            logger.warning(f'[即时指令] 拒绝 {kind}: {reason}')
+            self.send_ack_response(message_data, 400, reason, {})
             return
 
         try:
-            # 1) 接管：停止当前航点的目标点发布（航线线程会因此走“其他失败”分支终止）
-            self.perform_action_manager.set_stop_action(True)
+            # 1) 接管：停止当前航点的目标点发布（航线线程会因此走“其他失败”分支停靠/终止）
+            #    CONTINUE 例外：它不接管，只放行
+            if kind != 'CONTINUE':
+                self.perform_action_manager.set_stop_action(True)
             if aborted_task:
                 self.ros_topic_subscriber.set_cruises(self.cruises)
                 self._report_task_status(aborted_task, TaskStatus.CANCELED.value,
                                          f'平台即时指令 {kind} 接管，任务终止')
 
-            # 2) 停规划：把控制权从 ego_planner 交回飞控（原生 LAND/RTL 与悬停都需要）
-            self._publish_stop_planning()
+            # 2) 停规划：把控制权从 ego_planner 交回飞控（原生 LAND/RTL 与悬停都需要；
+            #    CONTINUE 不停规划——续航后线程马上重新发目标点，规划器自然恢复）
+            if kind != 'CONTINUE':
+                self._publish_stop_planning()
 
             # 3) 受理回执
             self.send_ack_response(message_data, 200, 'ok',
                                    {'command': kind, 'actionId': action_id,
-                                    'abortedTaskId': aborted_task or ''})
-            logger.info(f'[即时指令] 受理 {kind} actionId={action_id} 中止任务={aborted_task}')
+                                    'abortedTaskId': aborted_task or '',
+                                    'pausedTaskId': paused_task or ''})
+            logger.info(f'[即时指令] 受理 {kind} actionId={action_id} 中止任务={aborted_task} '
+                        f'暂停任务={paused_task}')
 
             threading.Thread(target=self._execute_uav_command,
-                             args=(kind, action_id, params, aborted_task), daemon=True).start()
+                             args=(kind, action_id, params, aborted_task, paused_task),
+                             daemon=True).start()
         except Exception as e:
             logger.error(f'[即时指令] 处理 {kind} 异常: {e}')
             with self._lock:
                 self.instant_cmd = None
             self.send_ack_response(message_data, 500, f'internal error: {e}', {})
 
-    def _execute_uav_command(self, kind, action_id, params, aborted_task):
+    def _execute_uav_command(self, kind, action_id, params, aborted_task, paused_task=None):
         """即时指令执行体（独立线程，避免占住 MQTT 网络线程导致后续指令收不到）。"""
         status, message = TaskStatus.ABORTED.value, f'{kind} 执行失败'
 
@@ -432,11 +485,22 @@ class CruiseUavTaskManager:
 
         try:
             if kind == 'HOVER':
-                # 已停规划且不再下发目标点：traj_server 持续发送当前位置设定点＝原地悬停
-                status, message = TaskStatus.COMPLETED.value, 'HOVERING 已停止规划，原地悬停'
-            elif kind in ('LAND', 'EMERGENCY_LAND'):
+                if paused_task:
+                    # 任务暂停：线程已停靠在当前航点，任务状态保留，等 CONTINUE 续航
+                    status, message = TaskStatus.COMPLETED.value, \
+                        f'HOVER_PAUSED 任务 {paused_task} 已暂停悬停，可发 CONTINUE 续航'
+                else:
+                    # 无在飞任务：已停规划且不再下发目标点，traj_server 持续发当前位置＝原地悬停
+                    status, message = TaskStatus.COMPLETED.value, 'HOVERING 已停止规划，原地悬停'
+            elif kind == 'CONTINUE':
+                # 续航：先恢复目标点下发能力，再解开停靠门（顺序不能反：线程醒来即重试当前航点）
+                self.perform_action_manager.set_stop_action(False)
+                with self._lock:
+                    self.task_paused = False
+                status, message = TaskStatus.COMPLETED.value, f'RESUMED 已继续任务 {paused_task}'
+            elif kind == 'LAND':
                 self.uav_action_manager.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-                logger.info(f'[即时指令] {kind} 已下发 PX4 原生 LAND（落地后由 comms 自动上锁）')
+                logger.info(f'[即时指令] {kind}（迫降语义）已下发 PX4 原生 LAND（落地后由 comms 自动上锁）')
                 status, message = self._finish_after_descent(kind, params)
             elif kind == 'RTL':
                 status, message = self._return_home_straight(action_id, params)
@@ -486,8 +550,11 @@ class CruiseUavTaskManager:
         return TaskStatus.ABORTED.value, f'已回原点但 {params["land_timeout"]}s 内未确认落地，已补发上锁命令'
 
     def _return_home_along_route(self, action_id, params) -> Tuple[int, str]:
-        """沿线返航：按已到达航点倒序逐点退回（机头反向 180 度），每段仍由 planner 自主避障；
-        单段不可达就跳过退回更近的点，最后再走原点完成降落。"""
+        """沿线返航：不必逐点都过，只回溯“关键点”（航点配置里 pos.key 打钩，
+        pcd 规划页导出）。按已到达的关键点倒序逐点退回（机头 yaw 反转 180 度），
+        每段仍由 planner 自主避障；单段不可达就跳过退回更近的点；
+        航线里没有任何关键点标记时退回“全部已到达航点”逐个倒返（保持旧行为）；
+        最后走直线返航回原点完成降落。"""
         self.perform_action_manager.set_stop_action(False)
         with self._lock:
             history = list(self.visited_waypoints)
@@ -495,11 +562,17 @@ class CruiseUavTaskManager:
             logger.warning('[沿线返航] 无已到达航点记录，退化为直线返航')
             return self._return_home_straight(action_id, params)
 
-        legs = list(reversed(history))
-        if params['route_max_legs'] > 0:
-            legs = legs[:params['route_max_legs']]
+        key_points = [p for p in history if p.get('key')]
+        if key_points:
+            back_points = list(reversed(key_points))
+            logger.info(f'[沿线返航] 已到达 {len(history)} 点，其中关键点 {len(back_points)} 个，只回溯关键点')
+        else:
+            back_points = list(reversed(history))
+            logger.info(f'[沿线返航] 航线未标记关键点，倒序退回全部 {len(back_points)} 个来路航点')
+        if params['route_max_points'] > 0:
+            back_points = back_points[:params['route_max_points']]
         flown = skipped = 0
-        for pos in legs:
+        for pos in back_points:
             back = {'x': pos['x'], 'y': pos['y'], 'z': pos['z'], 'd': self.flip_yaw(pos.get('d', 0.0))}
             result = self.perform_action_manager.perform_action_walk_to_pos_3d(back)
             if result.get('success', False):
@@ -512,7 +585,7 @@ class CruiseUavTaskManager:
                 continue
             logger.error(f'[沿线返航] 退回过程被中止: {msg}')
             break
-        logger.info(f'[沿线返航] 来路航点 {len(history)} 个: 实退={flown} 跳过={skipped}')
+        logger.info(f'[沿线返航] 回溯航点 {len(back_points)} 个: 实退={flown} 跳过={skipped}')
         return self._return_home_straight(action_id, params)
 
     def _publish_stop_planning(self):
@@ -540,10 +613,12 @@ class CruiseUavTaskManager:
         return False
 
     def _remember_visited_waypoint(self, pos: Dict[str, Any]) -> None:
-        """记录成功到达的航点（供沿线返航倒序退回），只保留必要字段并限制长度。"""
+        """记录成功到达的航点（供沿线返航倒序退回），只保留必要字段并限制长度；
+        pos.key（规划页打钩的关键点）一并记录，沿线返航优先只走关键点。"""
         try:
             item = {'x': float(pos['x']), 'y': float(pos['y']), 'z': float(pos['z']),
-                    'd': float(pos.get('d', 0.0) or 0.0)}
+                    'd': float(pos.get('d', 0.0) or 0.0),
+                    'key': bool(pos.get('key', False))}
         except (KeyError, TypeError, ValueError):
             return
         with self._lock:
@@ -731,6 +806,7 @@ class CruiseUavTaskManager:
                 current_task = self.current_task_id
                 self.current_task_id = None
                 self.cruises = []
+                self.task_paused = False    # 暂停停靠中的线程据此唤醒并退出
             
             self.ros_topic_subscriber.set_cruises(self.cruises)
             self._report_task_status(task_id, TaskStatus.CANCELED.value, '巡检任务取消')
@@ -871,6 +947,10 @@ class CruiseUavTaskManager:
                 self.cruises = [{'taskId': task_id, 'status': True}]
                 # 新任务开始：来路航点重新记录（供平台“沿线返航”倒序退回）
                 self.visited_waypoints = []
+                # 仅当接的是别的任务才清暂停标志：唤醒可能还停在 HOVER 停靠门上的旧线程，
+                # 其会因 task_id 不符自行退出；本任务自己的暂停（受理先于线程启动）不能碰
+                if self.current_task_id != task_id:
+                    self.task_paused = False
             self.ros_topic_subscriber.set_cruises(self.cruises)
             self.perform_action_manager.set_stop_action(False)
 
@@ -958,6 +1038,20 @@ class CruiseUavTaskManager:
                             # 仍在同点重试计数中 → 继续 while 重试同一航点
                             continue
                         else:
+                            # 即时指令下发的停止：任务被 HOVER 暂停 → 停靠在当前航点等续航；
+                            # 任务被其它指令接管/停止 → 收尾已由其完成，这里静默退出
+                            if self.task_paused:
+                                logger.info(f'任务{task_id}已在第{cruise_idx}个航点暂停，等待平台 CONTINUE 续航')
+                                while self.task_paused and self.is_executing and rclpy.ok():
+                                    time.sleep(0.5)
+                                if (not self.is_executing) or self.current_task_id != task_id:
+                                    logger.info(f'暂停任务{task_id}已被终止或替换，航线执行结束')
+                                    return
+                                logger.info(f'收到续航指令，任务{task_id}继续第{cruise_idx}个航点')
+                                continue
+                            if not self.is_executing or self.current_task_id != task_id:
+                                logger.info(f'任务{task_id}已被平台指令中止或替换，退出航线执行')
+                                return
                             # 其他失败（非不可达）→ 按原逻辑中止任务
                             logger.error(f'移动动作执行失败，已停止: {msg}')
                             self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')

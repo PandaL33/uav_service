@@ -369,11 +369,15 @@ class TaskDispatcherNode(Node):
                 'INITIALPOSE': lambda: self._handle_initial_pose(message_data, '初始化定位信息'),
                 'DEVICECONTROL': lambda: self._handle_device_control(message_data, '设备控制'),
                 'COMMANDDELIVER': lambda: self._handle_command_deliver(message_data, '远程指令下发'),
-                # 平台即时飞控指令：原地降落 / 直线返航 / 沿线返航 / 悬停 / 迫降
+                # 平台即时飞控指令：悬停(暂停) / 续航 / 降落（即迫降）/ 直线返航 / 沿线返航
                 # 两种写法都收：命令码直接给（cmd=LAND），或走通道码（cmd=UAVCOMMAND + body.command）
                 'UAVCOMMAND': lambda: self._handle_uav_command(message_data, '平台即时飞控指令'),
                 'LAND': lambda: self._handle_uav_command(message_data, '平台下发原地降落'),
                 'HOVER': lambda: self._handle_uav_command(message_data, '平台下发悬停'),
+                'CONTINUE': lambda: self._handle_uav_command(message_data, '平台下发续航'),
+                'CONTINUETASK': lambda: self._handle_uav_command(message_data, '平台下发续航'),
+                'RESUME': lambda: self._handle_uav_command(message_data, '平台下发续航'),
+                'RESUMETASK': lambda: self._handle_uav_command(message_data, '平台下发续航'),
                 'RTL': lambda: self._handle_uav_command(message_data, '平台下发直线返航'),
                 'RTLROUTE': lambda: self._handle_uav_command(message_data, '平台下发沿线返航'),
                 'EMERGENCYLAND': lambda: self._handle_uav_command(message_data, '平台下发迫降'),
@@ -505,7 +509,7 @@ class TaskDispatcherNode(Node):
         self.command_deliver.process_command_deliver(message_data)
 
     def _handle_uav_command(self, message_data, command_name):
-        """处理平台即时飞控指令（原地降落/直线返航/沿线返航/悬停/迫降）。
+        """处理平台即时飞控指令（悬停(暂停)/续航/降落（即迫降）/直线返航/沿线返航）。
 
         与航线任务共用同一个执行体（CruiseUavTaskManager），保证接管顺序、
         停规划入口和上报格式完全一致。

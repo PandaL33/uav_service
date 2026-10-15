@@ -78,7 +78,7 @@ class CommandDeliver:
                 # 其他类型机器人，预留接口
                 logger.info(f'非FFR机器人类型，指令下发命令已记录: {command}')
 
-            # 无人机的即时飞控指令（LAND/RTL/RTL_ROUTE/HOVER/EMERGENCY_LAND）转给统一执行体：
+            # 无人机的即时飞控指令（LAND/RTL/RTL_ROUTE/HOVER/CONTINUE）转给统一执行体：
             # 由它负责“接管在飞任务 -> 停规划 -> 执行”，并自己发受理 Ack 与终态 ActionReport
             # （不认识或参数不对时由它回 400），因此这里必须 return，避免重复回 200 掩盖真实结果。
             if ROBOT_TYPE != 'ffr' and self.uav_command_handler is not None:
