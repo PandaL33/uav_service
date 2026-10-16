@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import sim_support  # noqa: E402  （话题/QoS/换算的单一事实来源）
@@ -61,14 +62,18 @@ def main() -> int:
     # QoS 与在线订阅端成对（sim_support.pcl_pose_qos 是单一出处，勿在此另写一份）
     pub = node.create_publisher(PoseWithCovarianceStamped, args.pose_topic, sim_support.pcl_pose_qos())
     count = 0
+    last_log = 0.0
 
     def on_odom(msg):
-        nonlocal count
+        nonlocal count, last_log
         pub.publish(sim_support.wrap_odom_to_pcl_pose(msg, args.frame_id))
         count += 1
-        if count == 1 or count % 200 == 0:
+        # 每分钟输出一次累计帧数，避免频繁刷屏
+        now = time.time()
+        if count == 1 or now - last_log >= 60:
             p = msg.pose.pose.position
             logger.info('已发布 %d 帧 %s: x=%.2f y=%.2f z=%.2f', count, args.pose_topic, p.x, p.y, p.z)
+            last_log = now
 
     node.create_subscription(Odometry, args.odom_topic, on_odom, 10)
     logger.info('位姿桥: %s -> %s (frame=%s, use_sim_time=%s)',

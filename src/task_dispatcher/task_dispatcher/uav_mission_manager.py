@@ -223,7 +223,7 @@ class UavMissionManager():
         if self.current_state == 'IDLE':
             current_time = time.time()
             if current_time - self.last_log_time >= self.log_interval:
-                logger.info(f'无人机自主飞行状态，current_state: {self.current_state}')
+                logger.debug(f'无人机自主飞行状态，current_state: {self.current_state}')
                 self.last_log_time = current_time  # 更新上次打印时间
         else:
             # 发布offboard控制模式信号 - 必须持续发送

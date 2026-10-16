@@ -9,7 +9,7 @@ from threading import Thread, Lock
 import signal
 import os
 import platform
-from config import CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC    
+from config import CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO
 import cv2
 
 # 配置日志
@@ -67,6 +67,11 @@ class VideoPreviewManager:
             message_data: 包含播放视频命令的消息数据
         """
         try:
+            # 仿真环境视频已禁用：直接返回，不启动 ffmpeg/RTSP
+            if not ENABLE_VIDEO:
+                self.send_ack_response(message_data, 200, '视频功能已禁用（仿真环境）', {})
+                return
+
             # 提取请求参数
             body = message_data.get('body', {})
             camera_id = body.get('cameraId', '')
@@ -348,6 +353,12 @@ class VideoPreviewManager:
             - bit3: 录像状态（1表示正在录像，0表示未录像）
         """
         camera_status_list = []
+        
+        # 仿真环境视频已禁用：不探测 RTSP，直接全部上报为离线
+        if not ENABLE_VIDEO:
+            for camera_id in self.camera_rtsp_addresses.keys():
+                camera_status_list.append({'cameraId': camera_id, 'status': 0})
+            return camera_status_list
         
         try:
             # 遍历所有配置的摄像头ID

@@ -6,12 +6,14 @@
 """
 
 import json
+import math
 import time
 import threading
 from typing import Dict, Any, Optional
 import logging
 import paho.mqtt.client as mqtt
 from task_dispatcher.message_cache import message_cache_manager
+from .config import ROBOT_TYPE
 import uuid
 
 
@@ -125,6 +127,11 @@ class StatusReport:
             格式化的状态报告
         """
         # 构建状态报告
+        # 无人机：平台显示坐标约为实际的20倍，机端上报坐标÷20抵消；机器狗(default/ffr)保持原值不动
+        _pos_scale = 20.0 if ROBOT_TYPE == 'uav' else 1.0
+        # 方向(yaw)：无人机转为角度(度)，机器狗保持弧度不动
+        _yaw = float(robot_state.get('position', {}).get('d', 0.0))
+        _yaw_out = math.degrees(_yaw) if ROBOT_TYPE == 'uav' else _yaw
         report = {
             "sn": self.robot_sn,
             "ver": self.version,
@@ -137,10 +144,10 @@ class StatusReport:
                     "soc": float(robot_state.get('battery_level', 0.0)),
                     "charging": robot_state.get('battery_status', 0) == 1,
                     "pos": {
-                        "x": float(robot_state.get('position', {}).get('x', 0.0)),
-                        "y": float(robot_state.get('position', {}).get('y', 0.0)),
-                        "z": float(robot_state.get('position', {}).get('z', 0.0)),
-                        "d": float(robot_state.get('position', {}).get('d', 0.0))  # 默认方向，可根据需要从orientation计算
+                        "x": float(robot_state.get('position', {}).get('x', 0.0)) / _pos_scale,
+                        "y": float(robot_state.get('position', {}).get('y', 0.0)) / _pos_scale,
+                        "z": float(robot_state.get('position', {}).get('z', 0.0)) / _pos_scale,
+                        "d": _yaw_out  # 方向：无人机为度(deg)，机器狗保持弧度
                     }
                 },
                 "algos": [],
@@ -193,6 +200,13 @@ class StatusReport:
                 message_cache_manager.add_message(str(current_status['seq']), current_status)
                 #logger.info(f'已将状态报告消息加入缓存: seq={current_status["seq"]}')
                 
+                # 检查MQTT连接状态，未连接时跳过发布（避免断线风暴）
+                if not self.mqtt_client.is_connected():
+                    logger.debug(f'MQTT not connected, skip status report: seq={current_status["seq"]}')
+                    # 更新最后上报时间以避免频繁重试
+                    self._last_report_time = time.time()
+                    return
+                
                 # 发布到MQTT
                 result = self.mqtt_client.publish(
                     topic=self.mqtt_response_topic,
@@ -206,7 +220,7 @@ class StatusReport:
                 self._last_status = body.copy()
                 
                 if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                    logger.info(f'Status report published: seq={current_status["seq"]}')
+                    logger.debug(f'Status report published: seq={current_status["seq"]}')
                 else:
                     logger.error(f'Failed to publish status report: {result.rc}')
                 

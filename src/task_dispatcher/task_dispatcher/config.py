@@ -7,6 +7,9 @@ ROBOT_TYPE = "uav"
 FFR_SERVER_URL = "http://192.168.200.135:10030"
 # 视频流编码格式
 CODEC = "h265"
+# 视频总开关：true=启用视频预览/录制；false=禁用（仿真环境无 RTSP 相机时置 false，
+# 避免对空 URL 探测 RTSP / 起 ffmpeg 刷屏）
+ENABLE_VIDEO = True
 
 # 视频RTSP地址
 CAMERAID = "camera01"

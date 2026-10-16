@@ -875,11 +875,11 @@ class CruiseUavTaskManager:
             
             # 将消息添加到缓存
             message_cache_manager.add_message(status_msg['seq'], status_msg)
-            logger.info(f'已将任务状态消息加入缓存: seq={status_msg["seq"]}')
+            logger.debug(f'已将任务状态消息加入缓存: seq={status_msg["seq"]}')
             
             # 发布状态消息
             self.mqtt_client.publish(self.mqtt_response_topic, json.dumps(status_msg))
-            logger.info(f'已上报任务状态: taskId={task_id}, taskProgress={taskProgress}, message={error_msg}')
+            logger.debug(f'已上报任务状态: taskId={task_id}, taskProgress={taskProgress}, message={error_msg}')
             
         except Exception as e:
             logger.error(f'上报任务状态失败: {str(e)}')
@@ -969,7 +969,7 @@ class CruiseUavTaskManager:
                 logger.info(f"等待无人机解锁并起飞...")
                 while self.is_executing:
                     takeoff_time, arming_state = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
-                    logger.info(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
+                    logger.debug(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
                     # 无人机已经解锁并起飞
                     if takeoff_time > 0 and arming_state == 2:
                         break
@@ -978,7 +978,7 @@ class CruiseUavTaskManager:
                 logger.info(f"等待无人机降落...")
                 while self.is_executing:
                     takeoff_time, arming_state = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
-                    logger.info(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
+                    logger.debug(f"当前无人机解锁状态: {arming_state}, 起飞时间: {takeoff_time}")
                     # 无人机已经降落
                     if takeoff_time == 0 and arming_state == 1:
                         break
@@ -996,7 +996,7 @@ class CruiseUavTaskManager:
                     end_actions = cruise.get('endActions', [])
                     cruise_idx = cruise.get('idx', 0)
 
-                    logger.info(f"ing_actions: {ing_actions}, end_actions:{end_actions}")
+                    logger.debug(f"ing_actions: {ing_actions}, end_actions:{end_actions}")
                     
                     # 1、处理ingActions
                     # 是否需要停止任务, 最新的动作索引, 启动的算法列表
@@ -1285,10 +1285,10 @@ class CruiseUavTaskManager:
             
         if start:
             starting_algo_ids.append(algo_id)
-            logger.info(f"算法 {algo_id} 已成功启动, 当前启动中的算法列表: {starting_algo_ids}")
+            logger.debug(f"算法 {algo_id} 已成功启动, 当前启动中的算法列表: {starting_algo_ids}")
         else:
             starting_algo_ids.remove(algo_id)
-            logger.info(f"算法 {algo_id} 已成功关闭, 当前启动中的算法列表: {starting_algo_ids}")
+            logger.debug(f"算法 {algo_id} 已成功关闭, 当前启动中的算法列表: {starting_algo_ids}")
             
         return False
     

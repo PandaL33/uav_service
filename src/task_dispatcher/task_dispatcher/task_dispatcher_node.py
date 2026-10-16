@@ -201,6 +201,9 @@ class TaskDispatcherNode(Node):
         # 启动心跳定时器
         self.create_timer(1.0, self.check_mqtt_connection)
         self.create_timer(60, self.check_ros_service_availability)
+
+        # 每分钟一轮的 MQTT 活动统计（降噪：明细日志走 DEBUG，这里做汇总）
+        self._mqtt_stats = {'msgs': 0, 'acks': 0, 'conn_ok': 0, 'disconn': 0}
         
         # 初始化设备注册保活模块
         self.registration_manager = Registration(
@@ -244,7 +247,7 @@ class TaskDispatcherNode(Node):
         while rclpy.ok():
             try:
                 if not self.mqtt_connected:
-                    logger.info(f'连接到MQTT代理: {self.mqtt_broker}:{self.mqtt_port}')
+                    logger.debug(f'连接到MQTT代理: {self.mqtt_broker}:{self.mqtt_port}')
                     #重连前先停止旧的网络循环线程，避免线程泄漏导致CPU空转
                     self.mqtt_client.loop_stop()
                     self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
@@ -265,9 +268,10 @@ class TaskDispatcherNode(Node):
         MQTT连接回调
         """
         if rc == 0:
-            logger.info('已成功连接到MQTT代理')
+            self._mqtt_stats['conn_ok'] += 1
+            logger.debug('已成功连接到MQTT代理')
             self.mqtt_client.subscribe(self.mqtt_topic)
-            logger.info(f'已订阅主题: {self.mqtt_topic}')
+            logger.debug(f'已订阅主题: {self.mqtt_topic}')
         else:
             logger.error(f'MQTT连接失败，返回码: {rc}')
             self.mqtt_connected = False
@@ -276,6 +280,7 @@ class TaskDispatcherNode(Node):
         """
         MQTT断开连接回调
         """
+        self._mqtt_stats['disconn'] += 1
         logger.warning(f'MQTT断开连接，返回码: {rc}')
         self.mqtt_connected = False
     
@@ -284,7 +289,8 @@ class TaskDispatcherNode(Node):
         MQTT消息回调
         """
         try:
-            logger.info(f'收到MQTT消息: 主题={msg.topic}, 载荷={msg.payload.decode()}')
+            self._mqtt_stats['msgs'] += 1
+            logger.debug(f'收到MQTT消息: 主题={msg.topic}, 载荷={msg.payload.decode()}')
             
             # 解析MQTT消息
             message_data = json.loads(msg.payload.decode())
@@ -292,6 +298,7 @@ class TaskDispatcherNode(Node):
             # 处理注册和心跳的响应（不区分大小写）
             cmd = message_data.get('cmd', '').upper()
             if cmd == 'ACK':
+                self._mqtt_stats['acks'] += 1
                 # 获取ACK中的seq
                 seq = message_data.get('seq')
                 if seq:
@@ -303,22 +310,25 @@ class TaskDispatcherNode(Node):
                         # 根据原始cmd做相应处理
                         if original_cmd == 'Register':
                             self.registration_manager.handle_register_response(message_data)
-                            logger.info(f'收到注册响应，已处理: seq={seq}')
+                            logger.debug(f'收到注册响应，已处理: seq={seq}')
                         elif original_cmd == 'KeepAlive':
                             self.registration_manager.handle_keepalive_response(message_data)
-                            logger.info(f'收到心跳响应，已处理: seq={seq}')
+                            logger.debug(f'收到心跳响应，已处理: seq={seq}')
                         elif original_cmd == 'ActionReport':
                             # ActionReport的ACK处理逻辑
-                            logger.info(f'收到任务状态上报响应，已处理: seq={seq}')
+                            logger.debug(f'收到任务状态上报响应，已处理: seq={seq}')
                         elif original_cmd == 'AlarmNotify':
                             # AlarmNotify的ACK处理逻辑
-                            logger.info(f'收到告警通知响应，已处理: seq={seq}')
+                            logger.debug(f'收到告警通知响应，已处理: seq={seq}')
                         elif original_cmd == 'StatusReport':
                             # StatusReport的ACK处理逻辑
-                            logger.info(f'收到状态报告响应，已处理: seq={seq}')
+                            logger.debug(f'收到状态报告响应，已处理: seq={seq}')
+                        elif original_cmd == 'DeviceStatusReport':
+                            # 设备状态上报的ACK无需额外业务处理，仅记录
+                            logger.debug(f'收到设备状态上报响应，已处理: seq={seq}')
                         elif original_cmd == 'BuildMap':
                             # BuildMap的ACK处理逻辑
-                            logger.info(f'收到地图构建响应，已处理: seq={seq}')
+                            logger.debug(f'收到地图构建响应，已处理: seq={seq}')
                         else:
                             logger.warning(f'收到未知类型的ACK响应: seq={seq}, original_cmd={original_cmd}')
                     else:
@@ -593,9 +603,13 @@ class TaskDispatcherNode(Node):
                 
     def check_ros_service_availability(self):
         """
-        检查服务是否可用
+        检查服务是否可用，并输出本分钟内 MQTT 活动统计汇总（替代逐条刷屏明细）
         """
-        logger.info('ROS服务正常运行中...')
+        stats = self._mqtt_stats
+        logger.info('近1分钟 MQTT 统计: 收到消息=%d, ACK=%d, 连接成功=%d, 断开=%d (mqtt_connected=%s)',
+                    stats['msgs'], stats['acks'], stats['conn_ok'], stats['disconn'],
+                    self.mqtt_connected)
+        stats['msgs'] = stats['acks'] = stats['conn_ok'] = stats['disconn'] = 0
     
     def shutdown(self):
         """

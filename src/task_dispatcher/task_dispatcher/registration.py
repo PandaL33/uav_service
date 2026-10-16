@@ -374,11 +374,11 @@ class Registration:
             #     if 'status' in status_data:
             #         body['status'] = status_data['status']
             
-            logger.info(f'发送心跳包: {json.dumps(keepalive_request)}')
+            logger.debug(f'发送心跳包: {json.dumps(keepalive_request)}')
             
             # 将心跳请求添加到缓存
             message_cache_manager.add_message(keepalive_request['seq'], keepalive_request)
-            logger.info(f'已将心跳请求加入缓存: seq={keepalive_request["seq"]}')
+            logger.debug(f'已将心跳请求加入缓存: seq={keepalive_request["seq"]}')
             
             # 发布心跳请求
             self.mqtt_client.publish(self.response_topic, json.dumps(keepalive_request))

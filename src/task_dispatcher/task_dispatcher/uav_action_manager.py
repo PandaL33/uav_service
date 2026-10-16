@@ -68,7 +68,7 @@ class UavActionManager:
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
             0.0
         )
-        logger.info("发送上锁命令")
+        logger.debug("发送上锁命令")
         
     def exec_land_command(self):
         """处理降落状态"""
@@ -94,9 +94,14 @@ class UavActionManager:
                 self.current_state = 'DISARMING'
                 time.sleep(1)
                 # timeout_count = 0
+                last_arming_state = None
+                disarm_logged = False
                 while self.current_state == 'DISARMING':
                     takeofftime, arming_state = self.topic_subscriber.get_takeoff_time_and_arming_state()
-                    logger.info(f"arming_state: {arming_state}")
+                    # 仅当状态变化时打印，避免 constant 状态刷屏
+                    if arming_state != last_arming_state:
+                        logger.info(f"arming_state: {arming_state}")
+                        last_arming_state = arming_state
                     if arming_state == VehicleStatus.ARMING_STATE_DISARMED:
                         logger.info('无人机已上锁，任务完成')
                         # 切换到定点飞行模式（Position 模式）
@@ -106,8 +111,10 @@ class UavActionManager:
                         self.is_landed = False
                         return            
                     else:
-                        # 持续发送上锁命令直到成功
-                        #logger.info('无人机发送Land命令')
+                        # 持续发送上锁命令直到成功（PX4 需重复发送确保上锁），但"发送上锁命令"只记录一次
+                        if not disarm_logged:
+                            logger.info("发送上锁命令")
+                            disarm_logged = True
                         current_time = time.time()
                         if current_time - self.last_log_time >= 1.0:
                             robot_pos = self.topic_subscriber.get_position()

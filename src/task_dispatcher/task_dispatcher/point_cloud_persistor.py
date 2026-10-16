@@ -205,13 +205,13 @@ class PointCloudPersistor:
         """
         上传所有待上传的点云文件
         """
-        logger.info('开始检查待上传点云数据')
+        logger.debug('开始检查待上传点云数据')
         
         # 获取待上传记录
         pending_records = self._get_pending_records()
         
         if not pending_records:
-            logger.info('没有待上传的点云数据')
+            logger.debug('没有待上传的点云数据')
             return
         
         logger.info(f'发现{len(pending_records)}条待上传的点云数据')

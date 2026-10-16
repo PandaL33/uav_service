@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 from requests.auth import HTTPBasicAuth
 from auth_utils import AuthManager
-from .config import CAMERA01_URL, SEGMENT_DURATION, FORCE_FPS, RECORD_FILE_PATH
+from .config import CAMERA01_URL, SEGMENT_DURATION, FORCE_FPS, RECORD_FILE_PATH, ENABLE_VIDEO
 
 # 配置日志
 logger = logging.getLogger('task_dispatcher.rtsp_record_manager')
@@ -70,6 +70,9 @@ class RtspRecordManager:
         output_filename (str): 输出图片的文件名 (例如: snapshot.jpg)
         timeout (int): 连接超时时间（秒）
         """
+        # 仿真环境视频已禁用：不连接 RTSP
+        if not ENABLE_VIDEO:
+            return ''
         
         # 1. 创建 VideoCapture 对象
         # 注意：对于某些网络摄像头，可能需要在 URL 后面添加参数以保持连接稳定
@@ -317,6 +320,11 @@ class RtspRecordManager:
             logger.info("录制线程已安全退出。")
 
     def start_recording(self, task_id=None, save_record=True, upload_callback=None):
+        # 仿真环境视频已禁用：不连 RTSP、不启录制线程
+        if not ENABLE_VIDEO:
+            logger.debug("视频录制已禁用（仿真环境），跳过 start_recording")
+            return
+
         if self.is_recording:
             logger.warning("录制服务已在运行，忽略启动请求。")
             return

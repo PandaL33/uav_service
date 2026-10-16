@@ -525,6 +525,15 @@ rqt
   sudo ./install_task_dispatcher_service.sh
   ```
 
+#### MQTT 状态上报（StatusReport）坐标与方向
+`task_dispatcher` 通过 `StatusReport`（平台读取本机坐标/方向的上报路径）周期上报本机位姿，行为由 `ROBOT_TYPE` 区分（无人机 = `uav`，机器狗 = `default`/`ffr`）：
+
+- **坐标（pos.x/y/z）**：无人机机端上报坐标除以 `20`（平台显示坐标约为实际的 20 倍，机端提前缩放以适配显示）；机器狗保持原值不动。
+- **方向（pos.d）**：无人机转为角度（度，弧度经 `math.degrees` 转换）；机器狗保持弧度不动。
+- **上报周期**：`StatusReport` 与 `DeviceStatusReport` 默认每 **1 秒**上报一次（`ros2_topic_subscriber.py` 的 `min_interval = 1`）。
+
+> 说明：坐标除以 20 与方向转度的逻辑位于 `task_dispatcher/status_report.py::_create_status_report`，均带 `ROBOT_TYPE == 'uav'` 保护。
+
 ## 详细编译和测试流程
 
 以下是详细的编译和测试命令流程，可作为快速参考：

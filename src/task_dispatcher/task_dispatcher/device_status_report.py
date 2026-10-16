@@ -211,7 +211,14 @@ class DeviceStatusReport:
             "cmd": "DeviceStatusReport",
             "body": {
                 "deviceType": "uav",
-                "statusList": status_list
+                "statusList": status_list,
+                # 本机坐标（无人机上报路径；x/y/z 缩到 1/10 适配平台显示，d 为偏航角不缩放）
+                "position": {
+                    "x": round(device_state.get("position", {}).get("x", 0.0) , 3),
+                    "y": round(device_state.get("position", {}).get("y", 0.0) , 3),
+                    "z": round(device_state.get("position", {}).get("z", 0.0) , 3),
+                    "d": float(device_state.get("position", {}).get("d", 0.0))
+                }
             }
         }
         
@@ -263,7 +270,14 @@ class DeviceStatusReport:
                     # 将消息添加到缓存
                     message_cache_manager.add_message(str(current_status['seq']), current_status)
                     # logger.info(f'已将状态报告消息加入缓存: seq={current_status["seq"]}')
-                    
+
+                    # 检查MQTT连接状态，未连接时跳过发布（避免断线风暴刷ERROR）
+                    if not self.mqtt_client.is_connected():
+                        logger.debug(f'MQTT not connected, skip device status report: seq={current_status["seq"]}')
+                        # 更新最后上报时间以避免频繁重试
+                        self._last_report_time = time.time()
+                        return
+
                     # 发布到MQTT
                     result = self.mqtt_client.publish(
                         topic=self.mqtt_response_topic,

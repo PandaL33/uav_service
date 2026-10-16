@@ -83,7 +83,7 @@ class Ros2TopicSubscriber:
             self._status_report = StatusReport(
                 mqtt_client=mqtt_client,
                 robot_sn=robot_sn,
-                min_interval=5,
+                min_interval=1,
                 max_interval=60,
                 mqtt_response_topic=mqtt_response_topic,
                 version=version
@@ -95,7 +95,7 @@ class Ros2TopicSubscriber:
             self._device_status_report = DeviceStatusReport(
                 mqtt_client=mqtt_client,
                 robot_sn=robot_sn,
-                min_interval=5,
+                min_interval=1,
                 max_interval=60,
                 mqtt_response_topic=mqtt_response_topic,
                 version=version
@@ -381,9 +381,11 @@ class Ros2TopicSubscriber:
                 
                 # logger.info(f"无人机定位信息:经度:{msg.lat}, 维度:{msg.lon},高度:{msg.alt}")
                 
-                # 如果启用了状态上报，更新状态
+                # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
                 if self._enable_status_report and self._device_status_report:
-                    self._device_status_report.update_status(self.get_device_global_position_status())
+                    dev_global = self.get_device_global_position_status()
+                    dev_global['position'] = self.get_position()
+                    self._device_status_report.update_status(dev_global)
         except Exception as e:
             logger.error(f'处理无人机状态消息时出错: {e}')
 
@@ -401,9 +403,11 @@ class Ros2TopicSubscriber:
                 
                 # logger.info(f"无人机本地相对位置:相对高度:{-msg.z}, 水平速度:{math.sqrt(vx**2 + vy**2)},垂直速度:{-vz}")
                 
-                # 如果启用了状态上报，更新状态
+                # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
                 if self._enable_status_report and self._device_status_report:
-                    self._device_status_report.update_status(self.get_device_local_position_status())
+                    dev_local = self.get_device_local_position_status()
+                    dev_local['position'] = self.get_position()
+                    self._device_status_report.update_status(dev_local)
                     
         except Exception as e:
             logger.error(f'处理无人机状态消息时出错: {e}')
@@ -452,9 +456,11 @@ class Ros2TopicSubscriber:
             self._device_state["attitude"]["yaw_deg"] = round(math.degrees(yaw),3)
             
             # logger.info(f"无人机角度信息:rool:{math.degrees(roll)}, pitch:{math.degrees(pitch)}, yaw:{math.degrees(yaw)}")
-            # 如果启用了状态上报，更新状态
+            # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
             if self._enable_status_report and self._device_status_report:
-                self._device_status_report.update_status(self.get_device_attitude_status())
+                dev_att = self.get_device_attitude_status()
+                dev_att['position'] = self.get_position()
+                self._device_status_report.update_status(dev_att)
 
         except AttributeError as e:
             # 如果连 msg.q 都没有，那可能是消息定义完全不同，打印可用属性调试
