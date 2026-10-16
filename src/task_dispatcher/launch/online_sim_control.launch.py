@@ -19,12 +19,16 @@
        仿真机与真机同时在线时，务必覆盖 sn 与订阅主题避免混台抢单：
          robot_sn:=UAV_SIM_01 mqtt_topic:=/UAV/UAV_SIM_01/dn
 
-组成（3 个进程）
+组成（5 个进程）
     - sim_pcl_pose_bridge   : <namespace>/odometry 真值 -> /pcl_pose
                               （在线链路的位置来源是激光定位，仿真里没有，用桥补齐；
                                 换算与 QoS 和离线直喂共用 sim_support，同一份逻辑）
     - sim_uav_command_bridge: /uav_command(LAND 等) -> multirotor_communication 的 XTD2Cmd
                               （验证“返航受阻 -> 迫降”分支；不需要可关）
+    - mediamtx              : 本机 RTSP 服务器（8554），模拟真机云台相机的出流服务
+                              （enable_rtsp_camera:=false 或找不到二进制时跳过）
+    - sim_rtsp_camera_bridge: gz 相机 /<ns>/IMX214/image_raw -> ffmpeg 推流 -> mediamtx，
+                              在线配置经 SIM_CAMERA01_URL 注入录像/预览 URL（与真机同链路）
     - task_dispatcher_node  : 在线节点本体；/fmu 绝对话题经 remap 指向载具命名空间
 
 真机差异与风险（重要）
@@ -32,8 +36,9 @@
       请用测试 broker 或隔离的 robot_sn，勿与真机同号。
     - 任务下发时在线代码会走 map_manager.update_pcd_map(HTTP 拉图)：
       连不上文件服务器只是拖慢约 30s，不阻断任务（返回值未被检查，实测确认）。
-    - 在线代码的 `sudo systemctl start/stop ego_planner.service` 在仿真机无此 unit，
-      失败无副作用；demo 起的规划器进程不受影响。
+    - 在线代码的 `sudo systemctl start/stop ego_planner.service` 已被 sim_support 的
+      SimSubprocess 旁路（online_sim_bootstrap 打桩；sim_paths:=false 时原样执行，
+      仿真机无此 unit 会拖慢并中断任务线程，勿关）。
     - config.py 业务开关（ROBOT_TYPE=uav、PREFLIGHT/DOCK/MANUAL 关闭）与本场景一致；
       sim_paths:=true（默认）时仅覆盖“机载路径/相机/云台”这几个边界项到 /tmp
       （与离线套件同一注入套路，见 offline_sim/online_sim_bootstrap.py），
@@ -43,6 +48,7 @@
 """
 
 import os
+import shutil
 import sys
 
 from launch import LaunchDescription
@@ -89,6 +95,15 @@ def _default_python() -> str:
     return venv_py if os.path.isfile(venv_py) else 'python3'
 
 
+def _find_mediamtx(explicit: str) -> str:
+    """定位 MediaMTX 二进制：显式参数 > PATH > ~/.local/bin > /usr/local/bin。"""
+    for cand in (explicit.strip(), shutil.which('mediamtx'),
+                 os.path.expanduser('~/.local/bin/mediamtx'), '/usr/local/bin/mediamtx'):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return ''
+
+
 def launch_setup(context, *args, **kwargs):
     def value_of(name: str) -> str:
         return LaunchConfiguration(name).perform(context)
@@ -124,7 +139,32 @@ def launch_setup(context, *args, **kwargs):
         shell=False,
     )
 
-    # 3) 在线节点本体：与真机同一份 task_dispatcher_node.py、同一组参数
+    # 3) RTSP 相机源（仅 online_sim 需要视频；offline 套件不启动）：
+    #    mediamtx 本机服务器 + gz 相机图像推流桥，在线配置经 SIM_CAMERA01_URL 注入
+    enable_rtsp = value_of('enable_rtsp_camera').lower() == 'true'
+    rtsp_url = value_of('rtsp_url')
+    image_topic = (value_of('camera_image_topic').strip()
+                   or (f'{prefix}/IMX214/image_raw' if prefix else '/IMX214/image_raw'))
+    mediamtx_bin = _find_mediamtx(value_of('mediamtx_bin')) if enable_rtsp else ''
+    rtsp_actions = []
+    if enable_rtsp and mediamtx_bin:
+        # 显式指定配置：只开 RTSP（默认空配置会额外监听 HLS 8888 等，与本机服务撞端口）
+        mtx_cfg = os.path.expanduser('~/.config/mediamtx/mediamtx.yml')
+        mtx_cmd = [mediamtx_bin, mtx_cfg] if os.path.isfile(mtx_cfg) else [mediamtx_bin]
+        rtsp_actions.append(ExecuteProcess(
+            cmd=mtx_cmd, output='screen', name='mediamtx', shell=False))
+        rtsp_actions.append(ExecuteProcess(
+            cmd=[python_bin, os.path.join(OFFLINE_DIR, 'sim_rtsp_camera_bridge.py'),
+                 '--image-topic', image_topic,
+                 '--rtsp-url', rtsp_url,
+                 '--fps', value_of('camera_fps')],
+            output='screen', name='sim_rtsp_camera_bridge', shell=False))
+    elif enable_rtsp:
+        rtsp_actions.append(LogInfo(
+            msg='enable_rtsp_camera=true 但未找到 mediamtx：安装到 ~/.local/bin/mediamtx '
+                '或用 mediamtx_bin:= 指定（github.com/bluenviron/mediamtx releases 单二进制）'))
+
+    # 4) 在线节点本体：与真机同一份 task_dispatcher_node.py、同一组参数
     dispatcher_params = {
         'mqtt_broker': value_of('mqtt_broker'),
         'mqtt_port': value_of('mqtt_port'),
@@ -167,6 +207,10 @@ def launch_setup(context, *args, **kwargs):
             cmd += ['-r', f'{src_t}:={dst_t}']
         extra_env = {'PYTHONPATH': os.pathsep.join(
             p for p in (mod_dir, pkg_root, os.environ.get('PYTHONPATH', '')) if p)}
+        if enable_rtsp and mediamtx_bin:
+            # online_sim_bootstrap 据此覆盖 CAMERA01_URL 并打开 ENABLE_VIDEO
+            extra_env['SIM_CAMERA01_URL'] = rtsp_url
+            extra_env['SIM_ENABLE_VIDEO'] = 'true'
         if cpu_pin:
             cmd = ['bash', '-c', f'taskset -c {cpu_pin} ' + ' '.join(f"'{a}'" for a in cmd)]
         dispatcher = ExecuteProcess(cmd=cmd, output='screen', name='task_dispatcher_node',
@@ -198,6 +242,7 @@ def launch_setup(context, *args, **kwargs):
         actions.append(pose_bridge)
     if value_of('enable_command_bridge').lower() == 'true':
         actions.append(command_bridge)
+    actions.extend(rtsp_actions)
     actions.append(dispatcher)
     return actions
 
@@ -214,6 +259,17 @@ def generate_launch_description():
                               description='是否启动 /pcl_pose 位姿桥；外部已有定位源时置 false'),
         DeclareLaunchArgument('enable_command_bridge', default_value='true',
                               description='是否启动 /uav_command 命令桥（验证返航受阻->迫降分支）'),
+        DeclareLaunchArgument('enable_rtsp_camera', default_value='true',
+                              description='是否启动本机 RTSP 相机源（mediamtx + gz 相机推流桥），'
+                                          '并把它注入在线配置的 CAMERA01_URL/ENABLE_VIDEO'),
+        DeclareLaunchArgument('rtsp_url', default_value='rtsp://127.0.0.1:8554/main.264',
+                              description='推流与配置注入用的 RTSP 地址（与真机同构：MediaMTX 8554）'),
+        DeclareLaunchArgument('camera_image_topic', default_value='',
+                              description='gz 桥出来的相机图像话题，留空自动用 <ns>/IMX214/image_raw'),
+        DeclareLaunchArgument('camera_fps', default_value='15',
+                              description='推流帧率（仿真相机 30Hz 抽帧）'),
+        DeclareLaunchArgument('mediamtx_bin', default_value='',
+                              description='mediamtx 可执行文件路径，留空自动在 PATH/~/.local/bin 查找'),
         # ---- 端点参数：占位默认 + endpoint.local.json 覆盖（与 task_dispatcher.launch.py 同一份文件）----
         DeclareLaunchArgument('mqtt_broker', default_value=_default('mqtt_broker', 'test'),
                               description='MQTT代理服务器地址'),

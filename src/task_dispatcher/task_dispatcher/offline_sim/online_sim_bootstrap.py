@@ -20,7 +20,15 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import sim_support  # noqa: E402
 
 sim_support.bootstrap_sys_path()
-sim_support.install_sim_config()
+
+# 视频源注入：online_sim 套件会拉起 MediaMTX + sim_rtsp_camera_bridge（gz 相机推流），
+# 由 launch 通过环境变量把本机 RTSP 地址传给在线配置覆盖；未设置则维持无相机默认。
+overrides = dict(sim_support.SIM_CONFIG_OVERRIDES)
+cam_url = os.environ.get('SIM_CAMERA01_URL', '').strip()
+if cam_url:
+    overrides['CAMERA01_URL'] = cam_url
+    overrides['ENABLE_VIDEO'] = os.environ.get('SIM_ENABLE_VIDEO', 'true').lower() == 'true'
+sim_support.install_sim_config(overrides)
 
 # 旁路 systemd 边界：在线 _execute_task_thread 在 cruise 任务前会
 # `sudo systemctl start ego_planner.service`（见 cruise_uav_task_manager L1198），
