@@ -111,15 +111,11 @@ class UavActionManager:
                         self.is_landed = False
                         return            
                     else:
-                        # 持续发送上锁命令直到成功（PX4 需重复发送确保上锁），但"发送上锁命令"只记录一次
+                        # 持续发送上锁命令直到成功（PX4 需重复发送确保上锁），日志只打印一次
                         if not disarm_logged:
-                            logger.info("发送上锁命令")
-                            disarm_logged = True
-                        current_time = time.time()
-                        if current_time - self.last_log_time >= 1.0:
                             robot_pos = self.topic_subscriber.get_position()
                             logger.info(f'执行降落和上锁命令，当前点位置: ({robot_pos})')
-                            self.last_log_time = current_time  # 更新上次打印时间
+                            disarm_logged = True
                         # self.land()
                         self.disarm()
                     time.sleep(0.2) 
