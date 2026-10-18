@@ -11,15 +11,14 @@
 #      构建一次后才能被在线/离线代码 import；本脚本不负责构建它们，只装本机缺失的 Python/系统依赖。
 #
 # 用法：
-#   bash uav_service/scripts/setup_offline_sim_env.sh            # 建 venv + 装 python 依赖
+#   bash uav_service/scripts/setup_offline_sim_env.sh            # 装进当前 Python 环境（venv/conda/system 均可）
 #   bash uav_service/scripts/setup_offline_sim_env.sh --skip-apt # 跳过 sudo apt（gpiod 自行处理）
-#   bash uav_service/scripts/setup_offline_sim_env.sh --system   # 不建 venv，直接 pip install --user
+#   bash uav_service/scripts/setup_offline_sim_env.sh --system   # 强制 pip install --user
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # <repo> = .../XTDrone2_ego_planner
 WS_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"                 # <ws>   = .../xtd2_ws
-VENV_DIR="${REPO_ROOT}/uav_service/.venv"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WS_ROOT}/install/setup.bash"
 USE_WS_ROOT="${WS_SETUP}"
@@ -30,7 +29,7 @@ for arg in "$@"; do
   case "$arg" in
     --skip-apt) SKIP_APT=1 ;;
     --system)   USE_SYSTEM_PY=1 ;;
-    -h|--help)  sed -n '1,20p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '1,17p' "$0"; exit 0 ;;
     *) echo "未知参数: $arg（--skip-apt / --system）" >&2; exit 2 ;;
   esac
 done
@@ -66,27 +65,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2) Python 依赖：venv(--system-site-packages) 内锁 numpy<2 + paho-mqtt + opencv
+# 2) Python 依赖：装进当前 Python 环境（在哪个环境跑就装哪里，不创建也不识别 venv）
 # ---------------------------------------------------------------------------
 PY_BIN="python3"
-if [ "${USE_SYSTEM_PY}" -eq 0 ]; then
-  step "创建离线仿真 venv: ${VENV_DIR}（继承 ROS site-packages，不动系统 numpy）"
-  if [ ! -x "${VENV_DIR}/bin/python3" ]; then
-    python3 -m venv --system-site-packages "${VENV_DIR}"
-  else
-    echo "venv 已存在，复用"
-  fi
-  PY_BIN="${VENV_DIR}/bin/python3"
-  PIP_ARGS=()
-else
-  step "--system：直接装到用户 site-packages（注意会把 numpy 降到 <2，可能影响其它节点）"
+PIP_ARGS=()
+
+if [ "${USE_SYSTEM_PY}" -eq 1 ]; then
+  step "--system：装到用户 site-packages（pip install --user）"
   PIP_ARGS=(--user)
+else
+  step "安装到当前 Python 环境：$(command -v "${PY_BIN}")"
 fi
 
-step "安装/锁定 Python 依赖：numpy<2, paho-mqtt, opencv-python-headless"
-"${PY_BIN}" -m pip install -q "${PIP_ARGS[@]+"${PIP_ARGS[@]}"}" --upgrade pip
+step "安装/锁定 Python 依赖：numpy<2, paho-mqtt, opencv-python-headless, requests"
 "${PY_BIN}" -m pip install "${PIP_ARGS[@]+"${PIP_ARGS[@]}"}" \
-  "numpy<2" "paho-mqtt>=1.6" "opencv-python-headless"
+  "numpy<2" "paho-mqtt>=1.6" "opencv-python-headless" "requests"
 
 # ---------------------------------------------------------------------------
 # 3) 自检：离线链路所需 Python 模块能否导入（需在 ROS/工作区已 source 的环境里）
@@ -112,7 +105,7 @@ for p in (mod_root, os.path.dirname(mod_root)):
         sys.path.insert(0, p)
 
 need = ['rclpy', 'paho.mqtt.client', 'gpiod', 'tf_transformations', 'cv2',
-        'px4_msgs.msg', 'numpy']
+        'px4_msgs.msg', 'numpy', 'requests']
 bad = []
 for m in need:
     try:

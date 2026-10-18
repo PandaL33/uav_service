@@ -81,14 +81,13 @@ def _resolve_route(name: str) -> str:
 
 def _default_route() -> str:
     """默认航线：写死 launch 目录旁的 waypoints_3_3.json（PCD 规划页导出）。"""
-    return _resolve_route('waypoints_rk_garden.json')
-    # return _resolve_route('waypoints_3_3.json')
+    # return _resolve_route('waypoints_rk_garden.json')
+    return _resolve_route('waypoints_3_3.json')
 
 
 def _default_python() -> str:
-    """优先使用离线依赖 venv（setup_offline_sim_env.sh 生成），否则用系统 python3。"""
-    venv_py = os.path.join(REPO_ROOT, 'uav_service', '.venv', 'bin', 'python3')
-    return venv_py if os.path.isfile(venv_py) else 'python3'
+    """直接使用当前环境的 python3：依赖装在哪就在哪个环境启动（不识别/不创建 venv）。"""
+    return 'python3'
 
 
 def launch_setup(context, *args, **kwargs):
@@ -234,6 +233,6 @@ def generate_launch_description():
         DeclareLaunchArgument('dry_run', default_value='false',
                               description='只打印将要下发的 SETCRUISETASK 报文，不真飞'),
         DeclareLaunchArgument('python_bin', default_value='',
-                              description='运行离线节点的 python，留空自动优先 uav_service/.venv'),
+                              description='运行离线节点的 python，留空使用当前环境的 python3'),
         OpaqueFunction(function=launch_setup),
     ])

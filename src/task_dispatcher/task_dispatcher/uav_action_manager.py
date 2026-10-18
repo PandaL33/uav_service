@@ -75,7 +75,15 @@ class UavActionManager:
         time.sleep(2)
         self.current_state = 'LANDING'
         while self.current_state == 'LANDING':
-            if not self.is_landed:
+            # 已停桨（PX4 落地后自动上锁）直接判定着陆完成。
+            # 不能只依赖位置阈值：base_link 位于机身中心，落地后 z 不为 0，
+            # 起落架高度不同时阈值可能永远不满足，导致停桨后仍原地死循环。
+            status = self.topic_subscriber.get_vehicle_status()
+            already_disarmed = (status is not None and
+                                status.arming_state == VehicleStatus.ARMING_STATE_DISARMED)
+            if already_disarmed:
+                logger.info('检测到已停桨，判定已着陆')
+            elif not self.is_landed:
                 self.perform_action_walk_to_origin_pos()
             
             current_time = time.time()
@@ -88,7 +96,7 @@ class UavActionManager:
             # 定义原点
             origin = type('obj', (), {'x': 0.0, 'y': 0.0, 'z': 0.0})
             # 判断是否到达原点
-            arrived = self._uav_is_flying_to_point(origin)
+            arrived = already_disarmed or self._uav_is_flying_to_point(origin)
             if arrived:
                 logger.info('已着陆')
                 self.current_state = 'DISARMING'
