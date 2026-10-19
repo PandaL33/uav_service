@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "id": "1792138045396",
+    "task_id": "46614",
+    "file_path": "/home/cat/git/xtd2_ws/build/task_dispatcher/task_dispatcher/persisted_point_clouds/46614_1792138045396_test.pcd",
+    "created_time": 1792138045396,
+    "status": "uploading",
+    "updated_time": 1792138045905
+  },
+  {
+    "id": "1792396089179",
+    "task_id": "46630",
+    "file_path": "/home/cat/git/xtd2_ws/build/task_dispatcher/task_dispatcher/persisted_point_clouds/46630_1792396089179_test.pcd",
+    "created_time": 1792396089179,
+    "status": "uploading",
+    "updated_time": 1792396090503
+  }
+]
