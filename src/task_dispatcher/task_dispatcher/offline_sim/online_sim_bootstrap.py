@@ -71,6 +71,20 @@ if cam_url:
     _ensure_ffmpeg_on_path()
 sim_support.install_sim_config(overrides)
 
+# 相机在线探测超时适配：在线实现默认 timeout_sec=2（subprocess 硬超时 3s），而仿真
+# RTSP 首帧要等 GOP 关键帧，实测整条探测命令约 4.2s，会在 3s 被杀并误判离线，
+# 平台端一直显示“设备不在线”。仅本入口放宽到 8s，在线代码不改。
+from task_dispatcher import video_preview_manager as _video_preview_module  # noqa: E402
+
+_orig_is_rtsp_online = _video_preview_module.VideoPreviewManager.is_rtsp_online
+
+
+def _is_rtsp_online(self, rtsp_url, timeout_sec=8):
+    return _orig_is_rtsp_online(self, rtsp_url, timeout_sec)
+
+
+_video_preview_module.VideoPreviewManager.is_rtsp_online = _is_rtsp_online
+
 # 旁路 systemd 边界：在线 _execute_task_thread 在 cruise 任务前会
 # `sudo systemctl start ego_planner.service`（见 cruise_uav_task_manager L1198），
 # 仿真机无此 unit——sudo 挂起直至 timeout=120 抛 TimeoutExpired，被外层 except
