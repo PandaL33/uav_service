@@ -81,8 +81,8 @@ def _resolve_route(name: str) -> str:
 
 def _default_route() -> str:
     """默认航线：写死 launch 目录旁的 waypoints_3_3.json（PCD 规划页导出）。"""
-    # return _resolve_route('waypoints_rk_garden.json')
-    return _resolve_route('waypoints_3_3.json')
+    return _resolve_route('waypoints_rk_garden.json')
+    # return _resolve_route('waypoints_3_3.json')
 
 
 def _default_python() -> str:

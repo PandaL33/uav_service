@@ -85,6 +85,50 @@ def _is_rtsp_online(self, rtsp_url, timeout_sec=8):
 
 _video_preview_module.VideoPreviewManager.is_rtsp_online = _is_rtsp_online
 
+# 推流 URL 主机名预解析：venv 里的 imageio-ffmpeg 是静态链接构建，名称解析会与系统
+# NSS 模块冲突，ffmpeg 打开带主机名的 RTMP/RTSP 输出时直接段错误（returncode=-11，
+# 表现为“启动推流成功”后立刻退出）。用 Python 先解析成 IPv4 再交给 ffmpeg；
+# 服务端按 app/stream key 路由，tcUrl 里是 IP 不影响平台播放。
+import ipaddress  # noqa: E402
+import socket  # noqa: E402
+from urllib.parse import urlsplit, urlunsplit  # noqa: E402
+
+
+def _resolve_url_host(url):
+    """把 URL 中的主机名替换为解析后的 IPv4；已是 IP 或解析失败时原样返回。"""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if not host:
+            return url
+    except ValueError:
+        return url
+    try:
+        ipaddress.ip_address(host)
+        return url  # 已是 IP 字面量
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, parts.port, socket.AF_INET, socket.SOCK_STREAM)
+        ip = infos[0][4][0]
+    except OSError:
+        return url
+    netloc = ip if parts.port is None else '%s:%d' % (ip, parts.port)
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+_orig_start_stream = _video_preview_module.VideoPreviewManager._start_stream
+
+
+def _start_stream(self, camera_id, trans_type, push_url, username, password):
+    resolved_url = _resolve_url_host(push_url)
+    if resolved_url != push_url:
+        print(f'[online_sim_bootstrap] 推流地址主机名预解析: {push_url} -> {resolved_url}', flush=True)
+    return _orig_start_stream(self, camera_id, trans_type, resolved_url, username, password)
+
+
+_video_preview_module.VideoPreviewManager._start_stream = _start_stream
+
 # 可选诊断：SIM_VIDEO_DEBUG=1 时打开注册心跳与相机状态的 DEBUG 日志。
 # 心跳包完整 JSON（含上报给平台的 cameras 字段）与每次探测结果都只在 DEBUG 级别打印，
 # 排查“平台显示设备不在线”时用它核对平台实际收到的相机状态。
