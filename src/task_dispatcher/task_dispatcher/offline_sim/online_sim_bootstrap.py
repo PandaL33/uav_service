@@ -85,6 +85,14 @@ def _is_rtsp_online(self, rtsp_url, timeout_sec=8):
 
 _video_preview_module.VideoPreviewManager.is_rtsp_online = _is_rtsp_online
 
+# 可选诊断：SIM_VIDEO_DEBUG=1 时打开注册心跳与相机状态的 DEBUG 日志。
+# 心跳包完整 JSON（含上报给平台的 cameras 字段）与每次探测结果都只在 DEBUG 级别打印，
+# 排查“平台显示设备不在线”时用它核对平台实际收到的相机状态。
+if os.environ.get('SIM_VIDEO_DEBUG', '').lower() in ('1', 'true', 'yes'):
+    import logging
+    logging.getLogger('registration').setLevel(logging.DEBUG)
+    logging.getLogger('video_preview_manager').setLevel(logging.DEBUG)
+
 # 旁路 systemd 边界：在线 _execute_task_thread 在 cruise 任务前会
 # `sudo systemctl start ego_planner.service`（见 cruise_uav_task_manager L1198），
 # 仿真机无此 unit——sudo 挂起直至 timeout=120 抛 TimeoutExpired，被外层 except
