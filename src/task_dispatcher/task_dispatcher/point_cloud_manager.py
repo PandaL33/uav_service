@@ -397,9 +397,14 @@ class PointCloudManager:
             request = Trigger.Request()
             future = self.map_save_client.call_async(request)
             
-            # 4. 使用 SingleThreadedExecutor 避免 "wait set index too big" 错误
+            # 4. 轮询等待响应：本方法运行在任务线程，主线程的 rclpy.spin 已经在 spin 该节点，
+            #    在这里再对同一节点调用 spin_until_future_complete 会让同一个 wait set 被两个
+            #    线程并发访问，触发 "wait set index too big"。响应会由主线程 executor 处理，
+            #    这里只等待 future 完成即可（与 map_manager 推送地图的等待方式一致）。
             service_timeout = 60.0  # 服务调用超时时间（秒）
-            rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
+            deadline = time.time() + service_timeout
+            while not future.done() and time.time() < deadline:
+                time.sleep(0.1)
             #检查是否超时
             if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
