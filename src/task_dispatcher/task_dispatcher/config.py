@@ -57,3 +57,7 @@ WIND_SPEED_THRESHOLD = 3.0
 
 # 雨量阈值
 RAINFALL_THRESHOLD = 0
+
+# ================= 航点失效降级策略 =================
+# 连续多少个（不同）航点不可达后触发返航；单个航点会先重试 3 次再跳过
+WAYPOINT_CONSEC_LIMIT = 3

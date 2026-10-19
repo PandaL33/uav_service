@@ -74,7 +74,6 @@ class PerformActionManager:
         self.waypoint_stall_time_s = 10.0         # 10s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
         self.waypoint_min_progress = 0.15         # 2s 内须推进 >= 0.15m，否则停滞计数+1
-        self._stall_reset_token = 0               # 编排层收到 planner 失效上报后递增，move 循环据此重新计时
 
         # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
         self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
@@ -275,11 +274,6 @@ class PerformActionManager:
         except Exception:
             return None
 
-    def reset_stall_timer(self):
-        """编排层收到 planner 的 GOAL_UNREACHABLE 上报并计数后调用：
-        使正在运行的 move 循环停滞计时清零、重新起算，避免同一失效被 STALLED 双计。"""
-        self._stall_reset_token += 1
-
     def _is_airborne(self) -> bool:
         """飞机是否已起飞（解锁且 takeoff_time>0）。起桨/离地前返回 False。"""
         try:
@@ -392,7 +386,6 @@ class PerformActionManager:
                 st_last_dist = self._get_current_target_dist(x, y, z)
                 st_last_sample_t = time.time()
                 st_pause_logged = False       # 起飞前暂停判定的提示只打一次
-                st_reset_token = self._stall_reset_token  # 外部失效事件的重置令牌
                 while True:
                     self.goal_pose_pub_3d.publish(pose_msg)
 
@@ -424,17 +417,6 @@ class PerformActionManager:
                             st_pause_logged = True
                         time.sleep(0.2)
                         continue
-
-                    # ---- 外部失效事件重置计时 ----
-                    # 编排层收到 planner 的 GOAL_UNREACHABLE（OBSTACLE/PLAN_FAILED/REPLAN_FAILED）
-                    # 并已计入不可达计数后，调用 reset_stall_timer() 让停滞计时重新起算，
-                    # 避免同一失效事件在 10s 后又被 STALLED 重复计数。
-                    if self._stall_reset_token != st_reset_token:
-                        st_reset_token = self._stall_reset_token
-                        st_stall_accum = 0.0
-                        st_last_dist = self._get_current_target_dist(x, y, z)
-                        st_last_sample_t = time.time()
-                        logger.info(f'收到 planner 失效上报已计数，停滞判定重新计时: 目标(x={x}, y={y}, z={z})')
 
                     # ---- 停滞 watchdog ----
                     now_t = time.time()

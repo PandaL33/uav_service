@@ -29,6 +29,7 @@ from rclpy.client import Client
 from requests.auth import HTTPBasicAuth
 from .config import ROBOT_TYPE, PCD_FILE_PATH, ENABLE_MANUAL_CONTROL, AUTH_CONFIG
 from .config import ENABLE_PREFLIGHT_CHECK, ENABLE_DOCK_CONTROL, WIND_SPEED_THRESHOLD, RAINFALL_THRESHOLD  # 引入配置文件中的URL和点云文件路径
+from .config import WAYPOINT_CONSEC_LIMIT  # 连续不可达航点数 → 返航的阈值
 from uav_command_sender import UavCommandSender
 from dock_control_client import DockControlClient
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
@@ -149,12 +150,12 @@ class CruiseUavTaskManager:
 
         # 航点失效判定状态（编排侧，跨航点累计）
         #  same_point_retry : 同一航点不可达重试计数（>=3 → 跳过该航点）
-        #  consec_goals     : 连续不同航点不可达计数（>=2 → 返航）
+        #  consec_goals     : 连续不同航点不可达计数（>=WAYPOINT_CONSEC_LIMIT → 返航）
         self.same_point_retry = 0
         self.consec_goals = 0
         self.goal_seq_counter = 0
         self.waypoint_max_retry = 3        # 同一航点最多重试 3 次
-        self.waypoint_consec_limit = 2     # 连续 2 个航点不可达 → 返航
+        self.waypoint_consec_limit = WAYPOINT_CONSEC_LIMIT  # 连续 N 个航点不可达 → 返航（config.py 可配）
 
         # ===== 平台即时飞控指令（悬停(暂停) / 续航 / 降落（即迫降）/ 直线返航 / 沿线返航）=====
         # ego_planner 的控制入口：traj_server 收到 /stop_planning 会停止发送轨迹并清掉
@@ -174,7 +175,11 @@ class CruiseUavTaskManager:
         logger.info('巡检任务管理器初始化完成')
 
     def _mission_event_callback(self, msg: String):
-        """订阅 /mission_event：接收 ego planner 的不可达上报，计入不可达判定并重新计时。"""
+        """订阅 /mission_event：记录 ego planner 的不可达上报（只做观测/去重）。
+
+        不可达计数统一由 _handle_waypoint_unreachable 在每次 move 尝试失败时计一次，
+        本回调不再累加 same_point_retry，避免 planner 事件与 STALLED 返回值重复计数。
+        """
         try:
             data = json.loads(msg.data)
             event = data.get('event')
@@ -182,25 +187,18 @@ class CruiseUavTaskManager:
             if event != 'GOAL_UNREACHABLE':
                 return
             reason = data.get('reason', '')
-            # planner 侧三类不可达事件均为真失效，全部计入（3s 时间窗去重防双计）：
+            # planner 侧三类不可达事件均为真失效，保留日志便于排查（3s 时间窗去重防刷屏）：
             #   OBSTACLE      : 目标点落在膨胀障碍区，planner 直接拒绝该目标
             #   PLAN_FAILED   : GEN_NEW_TRAJ 连续 3 次规划失败 → 急停悬停并清目标回 WAIT_TARGET
             #   REPLAN_FAILED : REPLAN_TRAJ 连续 3 次重规划失败 → 急停悬停并清目标回 WAIT_TARGET
-            # STALLED 由 perform_action 返回值同步计入，此处不消费，避免双计。
             if source == 'planner' and reason in ('OBSTACLE', 'PLAN_FAILED', 'REPLAN_FAILED'):
                 now = time.time()
-                counted = False
                 with self._lock:
-                    if now - self.last_obstacle_ts >= self._unreachable_dedup_win:
-                        self.last_obstacle_ts = now
-                        self.same_point_retry += 1
-                        cnt = self.same_point_retry
-                        counted = True
-                if counted:
-                    # 本事件已计数：让 move 循环停滞计时重新起算，
-                    # 避免同一失效 10s 后又被 STALLED 重复计数
-                    self.perform_action_manager.reset_stall_timer()
-                    logger.warning(f"[mission_event] 收到 ego {reason} 上报，同点重试={cnt}")
+                    if now - self.last_obstacle_ts < self._unreachable_dedup_win:
+                        return
+                    self.last_obstacle_ts = now
+                logger.warning(f"[mission_event] ego planner 上报 {reason}，"
+                               f"不可达计数由 STALLED 统一累计")
         except Exception as e:
             logger.warning(f"解析 /mission_event 失败: {e}")
 
@@ -223,8 +221,9 @@ class CruiseUavTaskManager:
         判定规则（编排侧，完整判断不简化）：
           - 同一航点不可达累计 count >= waypoint_max_retry(3) → 跳过该航点(GOAL_SUBSTITUTED)，
             累计 consec_goals += 1；未到 3 次则等待重试(GOAL_UNREACHABLE 继续累计)。
-          - 连续不同航点不可达 count >= waypoint_consec_limit(2) → RETURN_INIT 触发返航。
-          - 返航段（RETURN_BLOCKED）：返航途中遇障不可达 且 无更近可绕航点 → 迫降。
+          - 连续不同航点不可达 count >= waypoint_consec_limit（config.WAYPOINT_CONSEC_LIMIT，默认 3）→ RETURN_INIT 触发沿线返航。
+          - 返航段（RETURN_BLOCKED）：沿线关键点一路跳过，全部不可达则退化为直线返航；
+            安全点均不可达时由 _emergency_land 迫降兜底。
         """
         # 共享计数器读写与 _mission_event_callback 共锁（两线程：任务线程 + executor 回调线程）
         with self._lock:
@@ -270,14 +269,18 @@ class CruiseUavTaskManager:
                 flight_epoch=getattr(self, 'flight_epoch', 'NA'),
                 consec_goals=consec,
                 trigger='REACH_FAIL')
-            # 返航执行：回原点；若返航段遇障不可达 → RETURN_BLOCKED → 迫降（在锁外执行，避免长阻塞持锁）
-            return self._return_to_origin(task_id)
+            # 返航执行：按已到达的关键点沿线退回（途中不可达的关键点一路跳过，
+            # 全部跳过则退化为直线返航，仍不可达则由 _emergency_land 迫降兜底）。
+            # 在锁外执行，避免长阻塞持锁。
+            params = {'land_timeout': 60.0, 'route_max_points': 0}
+            self._return_home_along_route(task_id, params)
+            return True
 
         # 4) 尚未达连续上限，跳过本航点继续下一航点（外层循环自然 continue）
         return False
 
     def _return_to_origin(self, task_id: str) -> bool:
-        """返航回原点；返航途中遇障无法推进 → RETURN_BLOCKED 并触发迫降。"""
+        """返航回原点；返航途中遇障无法推进 → RETURN_BLOCKED 并转迫降兜底。"""
         self._publish_mission_event(
             'RETURN_INIT',
             goal_seq=self.goal_seq_counter,
@@ -290,7 +293,7 @@ class CruiseUavTaskManager:
         hover_pos = {'x': 0.0, 'y': 0.0, 'z': 1.0, 'd': 0.0}
         result = self.perform_action_manager.perform_action_walk_to_pos_3d(hover_pos)
         if not result.get('success', False):
-            logger.error(f"[返航受阻] task={task_id} 去原点悬停点 (0,0,1) 不可达，触发迫降")
+            logger.error(f"[返航受阻] task={task_id} 去原点悬停点 (0,0,1) 不可达，转入迫降兜底")
             self._publish_mission_event(
                 'RETURN_BLOCKED',
                 goal_seq=self.goal_seq_counter,
@@ -302,21 +305,60 @@ class CruiseUavTaskManager:
         result = self.perform_action_manager.perform_action_walk_to_pos_3d(origin_pos)
         success = result.get('success', False)
         if not success:
-            logger.error(f"[返航受阻] task={task_id} 返航末段降落不可达，触发迫降")
+            logger.error(f"[返航受阻] task={task_id} 返航末段降落不可达，原地迫降")
             self._publish_mission_event(
                 'RETURN_BLOCKED',
                 goal_seq=self.goal_seq_counter,
                 flight_epoch=getattr(self, 'flight_epoch', 'NA'),
                 reason='OBSTACLE_BLOCKED')
-            # 迫降执行：直接下发 LAND 命令（复用 uav_mission_manager 迫降状态机）
-            self._emergency_land(task_id)
+            # 已在原点上方悬停点，原地迫降比再飞回远处安全点更安全
+            self._emergency_land(task_id, try_safe_point=False)
             return True
         logger.info(f"[返航完成] task={task_id} 已回原点")
         return True
 
-    def _emergency_land(self, task_id: str) -> bool:
-        """迫降：下发 LAND 命令，复用 uav_mission_manager 的 LANDING→DISARMING 状态机。"""
+    def _emergency_land(self, task_id: str, try_safe_point: bool = True) -> bool:
+        """迫降兜底：先退到已确认安全的位置再迫降，避免在未知地形/人群上方垂直下降。
+
+        候选安全点按序尝试，任一到达即在该处下发 LAND：
+          1) 最近一个已到达的关键点（航线未标记关键点时取来路最后一个航点）
+          2) 起飞点上方悬停点 (0,0,1)
+        全部不可达才在原地迫降。try_safe_point=False 用于「已到达原点悬停点、
+        仅末段下降受阻」的场景：此时原地迫降比再飞回远处航点更安全。
+        """
+        if try_safe_point:
+            with self._lock:
+                history = list(self.visited_waypoints)
+            key_points = [p for p in history if p.get('key')]
+            if key_points:
+                candidates = [key_points[-1]]
+            elif history:
+                candidates = [history[-1]]
+            else:
+                candidates = []
+            candidates.append({'x': 0.0, 'y': 0.0, 'z': 1.0, 'd': 0.0})
+
+            reached = False
+            for pos in candidates:
+                target = {'x': pos['x'], 'y': pos['y'], 'z': pos['z'],
+                          'd': pos.get('d', 0.0)}
+                logger.warning(f"[迫降] task={task_id} 先尝试退到安全点: {target}")
+                try:
+                    result = self.perform_action_manager.perform_action_walk_to_pos_3d(target)
+                except Exception as e:
+                    logger.error(f"[迫降] 退往 {target} 异常: {e}")
+                    continue
+                if result.get('success', False):
+                    logger.warning(f"[迫降] task={task_id} 已到达安全点 {target}，就地迫降")
+                    reached = True
+                    break
+                logger.warning(f"[迫降] 安全点不可达: {target}, {result.get('message', '')}")
+            if not reached:
+                logger.error(f"[迫降] task={task_id} 所有安全点均不可达，原地迫降")
+
         logger.error(f"[迫降] task={task_id} 执行应急迫降")
+        # 先停规划，把控制权交回飞控，避免 planner 的 offboard 设定点与 PX4 原生 LAND 抢控制
+        self._publish_stop_planning()
         try:
             self.uav_command_sender.send_command('LAND')
             return True
@@ -1005,7 +1047,7 @@ class CruiseUavTaskManager:
                         self.rtst_record_manager.stop_recording()
                         return
 
-                    # 2、处理move动作（含航点失效判定：同点重试≥3跳点 / 连续2点不可达返航 / 返航遇障迫降）
+                    # 2、处理move动作（含航点失效判定：同点重试≥3跳点 / 连续 WAYPOINT_CONSEC_LIMIT 点不可达返航 / 返航遇障迫降）
                     with self._lock:
                         self.goal_seq_counter += 1
                     skipped_current = False
