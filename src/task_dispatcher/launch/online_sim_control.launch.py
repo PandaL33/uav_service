@@ -28,7 +28,9 @@
     - mediamtx              : 本机 RTSP 服务器（8554），模拟真机云台相机的出流服务
                               （enable_rtsp_camera:=false 或找不到二进制时跳过）
     - sim_rtsp_camera_bridge: gz 相机 /<ns>/IMX214/image_raw -> ffmpeg 推流 -> mediamtx，
-                              在线配置经 SIM_CAMERA01_URL 注入录像/预览 URL（与真机同链路）
+                              在线配置经 SIM_CAMERA01_URL 注入录像/预览 URL（与真机同链路）；
+                              仿真侧同时把 CODEC 从 h265 改为 h264 透传（x86 无 h264_rkmpp），
+                              并让在线节点的 ffmpeg 调用优先命中 venv 的 imageio-ffmpeg
     - task_dispatcher_node  : 在线节点本体；/fmu 绝对话题经 remap 指向载具命名空间
 
 真机差异与风险（重要）
@@ -207,8 +209,9 @@ def launch_setup(context, *args, **kwargs):
             cmd += ['-r', f'{src_t}:={dst_t}']
         extra_env = {'PYTHONPATH': os.pathsep.join(
             p for p in (mod_dir, pkg_root, os.environ.get('PYTHONPATH', '')) if p)}
-        if enable_rtsp and mediamtx_bin:
-            # online_sim_bootstrap 据此覆盖 CAMERA01_URL 并打开 ENABLE_VIDEO
+        if enable_rtsp:
+            # online_sim_bootstrap 据此覆盖 CAMERA01_URL、打开 ENABLE_VIDEO，
+            # 并把 CODEC 从 h265(h264_rkmpp) 切到 h264 透传（x86 无 Rockchip 编码器）
             extra_env['SIM_CAMERA01_URL'] = rtsp_url
             extra_env['SIM_ENABLE_VIDEO'] = 'true'
         if cpu_pin:
@@ -230,14 +233,23 @@ def launch_setup(context, *args, **kwargs):
         dispatcher = Node(**node_kwargs)
         runner_desc = 'colcon 安装入口（package=task_dispatcher）'
 
+    video_injected = enable_rtsp and use_venv_runner and sim_paths
+    video_desc = f'相机={rtsp_url}' if enable_rtsp else '相机关闭'
     print(f'[online_sim_control] 载具命名空间={prefix or "(无)"} 位姿来源={truth_odom} -> /pcl_pose '
           f'fmu重映射={len(remap_pairs)}条 MQTT={value_of("mqtt_broker")}:{value_of("mqtt_port")} '
-          f'sn={value_of("robot_sn")} 节点运行方式={runner_desc}')
+          f'sn={value_of("robot_sn")} 节点运行方式={runner_desc} '
+          f'视频={video_desc}({"已注入" if video_injected else "未注入配置"}) '
+          f'mediamtx={"已找到" if mediamtx_bin else "未找到"}')
 
     actions = [
         LogInfo(msg='在线仿真控制：task_dispatcher 按原始配置真连平台 MQTT，平台会把本仿真机'
                     '当作在线设备派单；与真机同时在线时请用 robot_sn/mqtt_topic 覆盖隔离'),
     ]
+    if enable_rtsp and not video_injected:
+        actions.append(LogInfo(
+            msg='enable_rtsp_camera=true 但视频配置未注入在线节点：需要存在离线 venv'
+                '（或 dispatcher_python 指定解释器）且 sim_paths:=true；否则节点仍用 config.py 的'
+                ' CAMERA01_URL/CODEC=h265，平台会显示相机离线、点播推流失败'))
     if value_of('enable_pose_bridge').lower() == 'true':
         actions.append(pose_bridge)
     if value_of('enable_command_bridge').lower() == 'true':

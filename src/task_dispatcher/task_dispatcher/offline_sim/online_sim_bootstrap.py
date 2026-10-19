@@ -14,12 +14,48 @@ task_dispatcher 包代码零改动，除边界路径外所有业务开关仍是 
 """
 
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import sim_support  # noqa: E402
 
 sim_support.bootstrap_sys_path()
+
+
+def _ensure_ffmpeg_on_path() -> str:
+    """让在线代码（探测/预览推流都写死调用 `ffmpeg`）用上可用的 ffmpeg。
+
+    仿真机常见两种情况：PATH 里根本没有 ffmpeg（依赖只在 venv 的 imageio-ffmpeg 里），
+    或 PATH 里是精简构建（缺 rtsp muxer/编码器）。与 sim_rtsp_camera_bridge 同一优先级
+    选一个，再在 /tmp 做 `ffmpeg` 软链并前置 PATH，在线代码零改动。
+    """
+    candidates = []
+    try:
+        import imageio_ffmpeg
+        candidates.append(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        pass
+    candidates.append(shutil.which('ffmpeg') or '')
+    exe = next((c for c in candidates if c and os.path.isfile(c) and os.access(c, os.X_OK)), '')
+    if not exe:
+        print('[online_sim_bootstrap] 警告：找不到可用的 ffmpeg，相机在线探测与平台推流会失败', flush=True)
+        return ''
+
+    shim_dir = '/tmp/uav_online_sim/bin'
+    os.makedirs(shim_dir, exist_ok=True)
+    link = os.path.join(shim_dir, 'ffmpeg')
+    try:
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(exe, link)
+    except OSError as exc:
+        print(f'[online_sim_bootstrap] 警告：创建 ffmpeg 软链失败({exc})，沿用 PATH', flush=True)
+        return exe
+    os.environ['PATH'] = shim_dir + os.pathsep + os.environ.get('PATH', '')
+    print(f'[online_sim_bootstrap] 在线视频链路使用 ffmpeg: {exe}', flush=True)
+    return exe
+
 
 # 视频源注入：online_sim 套件会拉起 MediaMTX + sim_rtsp_camera_bridge（gz 相机推流），
 # 由 launch 通过环境变量把本机 RTSP 地址传给在线配置覆盖；未设置则维持无相机默认。
@@ -28,6 +64,11 @@ cam_url = os.environ.get('SIM_CAMERA01_URL', '').strip()
 if cam_url:
     overrides['CAMERA01_URL'] = cam_url
     overrides['ENABLE_VIDEO'] = os.environ.get('SIM_ENABLE_VIDEO', 'true').lower() == 'true'
+    # 仿真相机桥输出的已是 H.264；真机配置的 h265 分支用 Rockchip 硬件编码器
+    # (h264_rkmpp)，x86 仿真机上不存在，会让平台推流即时失败（节点仍回 200）。
+    # 这里改走 h264 透传（-c:v copy）。
+    overrides['CODEC'] = os.environ.get('SIM_CODEC', 'h264')
+    _ensure_ffmpeg_on_path()
 sim_support.install_sim_config(overrides)
 
 # 旁路 systemd 边界：在线 _execute_task_thread 在 cruise 任务前会
