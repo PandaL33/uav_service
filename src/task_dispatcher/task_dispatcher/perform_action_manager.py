@@ -71,9 +71,9 @@ class PerformActionManager:
         #   stall_time_s    : 连续无有效推进的秒数阈值，触发一次停滞判定
         #   stall_dist_min  : 单次判定期内必须至少推进的水平距离(m)，否则视为停滞
         #   stall_progress  : 停滞判定期的采样间隔(s)
-        self.waypoint_stall_time_s = 10.0         # 10s 无推进 → 判定不可达
+        self.waypoint_stall_time_s = 2.0          # 2s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
-        self.waypoint_min_progress = 0.15         # 2s 内须推进 >= 0.15m，否则停滞计数+1
+        self.waypoint_min_progress = 0.10         # 2s 内须推进 >= 0.10m，否则停滞计数+1
 
         # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
         self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
