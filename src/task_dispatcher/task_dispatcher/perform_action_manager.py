@@ -88,6 +88,9 @@ class PerformActionManager:
         # 同一目标 2s 窗口内的重复上报去重（planner 会连续刷同类事件）。
         self.planner_unreach_win = 2.0
         self._planner_unreach_t: Optional[float] = None
+        # OBSTACLE 单独记录：目标点本身落在膨胀区内，推进量再大也无法到达，
+        # 不能像 PLAN_FAILED 那样被"已恢复推进"作废，只按观察窗判失败。
+        self._planner_obstacle_t: Optional[float] = None
         self._mission_event_sub = self.node.create_subscription(
             String, "/mission_event", self._on_mission_event, 10)
 
@@ -219,6 +222,8 @@ class PerformActionManager:
 
         只认 source=planner 的三类真失效事件；同一目标 2s 窗口内的重复上报去重，
         避免连续刷事件把不可达判定提前。自身发布的 STALLED 事件无 source，不会触发起算。
+        OBSTACLE 额外记一份粘滞时间戳：目标在膨胀区是目标本身的性质，飞机边飞边靠近
+        不能被当成"恢复推进"，否则障碍航点会被按 0.4m 到达阈值误判成功。
         """
         try:
             data = json.loads(msg.data)
@@ -233,6 +238,10 @@ class PerformActionManager:
             return
         now = time.time()
         with self._lock:
+            if reason == 'OBSTACLE' and self._planner_obstacle_t is None:
+                # 只保留首次上报时刻：planner 会随每次重发目标重复刷 OBSTACLE，
+                # 若每帧刷新时间戳，观察窗永远不会走满，判据失效。
+                self._planner_obstacle_t = now
             if (self._planner_unreach_t is not None and
                     now - self._planner_unreach_t < self.planner_unreach_win):
                 return   # 2s 窗口内重复上报，去重（保留首次起算时刻）
@@ -427,10 +436,12 @@ class PerformActionManager:
                 #   由编排层(cruise)累计连续失败并决定 跳点/返航/迫降。
                 with self._lock:
                     self._planner_unreach_t = None   # 新一次航点尝试，清空 planner 上报
+                    self._planner_obstacle_t = None  # OBSTACLE 只对当前航点粘滞，换点即清
                 st_stall_accum = 0.0          # 累计停滞秒数
                 st_last_dist = self._get_current_target_dist(x, y, z)
                 st_last_sample_t = time.time()
                 st_pause_logged = False       # 起飞前暂停判定的提示只打一次
+                st_planner_suppress_logged = False  # "planner 上报不可达时抑制到达判定"只提示一次
                 while True:
                     self.goal_pose_pub_3d.publish(pose_msg)
 
@@ -442,7 +453,17 @@ class PerformActionManager:
                         }
 
                     to_target = self._uav_is_flying_to_point(pose_msg.pose.position)
-                    if to_target:
+                    # planner 已自报本航点不可达(OBSTACLE/PLAN_FAILED/REPLAN_FAILED)时，
+                    # 距离判据不能压过它：航点设在障碍里时飞机会停在墙边，残差恰好落进
+                    # 0.4m 到达阈值。若先判到达就会当成成功，失败计数永远不触发。
+                    with self._lock:
+                        planner_unreach_pending = (self._planner_unreach_t is not None or
+                                                   self._planner_obstacle_t is not None)
+                    if to_target and planner_unreach_pending and not st_planner_suppress_logged:
+                        st_planner_suppress_logged = True
+                        logger.warning('已进入到达阈值，但 planner 上报本航点不可达，暂不判成功: '
+                                       f'目标(x={x}, y={y}, z={z})')
+                    if to_target and not planner_unreach_pending:
                         logger.info(f'飞行动作执行成功, 当前坐标点: {self.topic_subscriber.get_position()}')
                         time.sleep(1.0)
                         return {
@@ -465,9 +486,29 @@ class PerformActionManager:
                         time.sleep(0.2)
                         continue
 
+                    # ---- planner 上报目标在障碍内：目标本身不可达 ----
+                    # 这类上报不能按"已恢复推进"作废：飞机朝墙飞近不代表可达；也不能
+                    # 被 0.4m 到达阈值判成功（墙边停住时残差恰好落进阈值）。观察窗满即失败。
+                    now_t = time.time()
+                    with self._lock:
+                        planner_obstacle_t = self._planner_obstacle_t
+                    if (planner_obstacle_t is not None and
+                            now_t - planner_obstacle_t >= self.planner_unreach_win):
+                        logger.error(f'planner 上报目标在障碍内，{now_t - planner_obstacle_t:.1f}s 后仍不可达，判定不可达: '
+                                     f'目标(x={x}, y={y}, z={z})')
+                        self._publish_mission_event(
+                            'GOAL_UNREACHABLE',
+                            reason='OBSTACLE',
+                            goal_seq='NA',
+                            flight_epoch='NA',
+                            target=(f'{x:.2f},{y:.2f},{z:.2f}'))
+                        return {
+                            'success': False,
+                            'message': f'GOAL_UNREACHABLE: 目标在障碍内 (x={x}, y={y}, z={z})'
+                        }
+
                     # ---- planner 上报不可达：2s 观察窗 ----
                     # 规划器已自报无解，无需再等 10s 停滞计时；留 2s 给换轨/重规划恢复机会。
-                    now_t = time.time()
                     with self._lock:
                         planner_unreach_t = self._planner_unreach_t
                     if (planner_unreach_t is not None and
