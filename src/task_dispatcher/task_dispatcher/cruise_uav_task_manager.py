@@ -146,7 +146,7 @@ class CruiseUavTaskManager:
         self.mission_event_sub = self.node.create_subscription(
             String, "/mission_event", self._mission_event_callback, 10)
         self.last_obstacle_ts = 0.0   # 同 reason 去重时间窗起点
-        self._unreachable_dedup_win = 3.0  # 3s 内同一 reason 只计一次
+        self._unreachable_dedup_win = 2.0  # 2s 内同一 reason 只计一次（间隔 >=2s 视为新的有效上报）
 
         # 航点失效判定状态（编排侧，跨航点累计）
         #  same_point_retry : 同一航点不可达重试计数（>=3 → 跳过该航点）
@@ -187,7 +187,7 @@ class CruiseUavTaskManager:
             if event != 'GOAL_UNREACHABLE':
                 return
             reason = data.get('reason', '')
-            # planner 侧三类不可达事件均为真失效，保留日志便于排查（3s 时间窗去重防刷屏）：
+            # planner 侧三类不可达事件均为真失效，保留日志便于排查（2s 时间窗去重防刷屏）：
             #   OBSTACLE      : 目标点落在膨胀障碍区，planner 直接拒绝该目标
             #   PLAN_FAILED   : GEN_NEW_TRAJ 连续 3 次规划失败 → 急停悬停并清目标回 WAIT_TARGET
             #   REPLAN_FAILED : REPLAN_TRAJ 连续 3 次重规划失败 → 急停悬停并清目标回 WAIT_TARGET

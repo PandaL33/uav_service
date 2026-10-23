@@ -71,9 +71,22 @@ class PerformActionManager:
         #   stall_time_s    : 连续无有效推进的秒数阈值，触发一次停滞判定
         #   stall_dist_min  : 单次判定期内必须至少推进的水平距离(m)，否则视为停滞
         #   stall_progress  : 停滞判定期的采样间隔(s)
-        self.waypoint_stall_time_s = 2.0          # 2s 无推进 → 判定不可达
+        # 采样间隔保持 2s（每 2s 取一次 ego 位姿算推进量），
+        # 但累计停滞满 10s（即连续 5 个判定窗无推进）才判不可达，
+        # 避免规划器换轨/短暂原地调整被误判为停滞。
+        self.waypoint_stall_time_s = 10.0         # 累计 10s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
         self.waypoint_min_progress = 0.10         # 2s 内须推进 >= 0.10m，否则停滞计数+1
+
+        # ---- planner 侧不可达上报（/mission_event）----
+        # 规划器自报无解(OBSTACLE / PLAN_FAILED / REPLAN_FAILED)比"推进量"更权威：
+        # 收到后开一个 planner_unreach_win(2s) 观察窗，窗口内若已恢复有效推进则作废；
+        # 满窗仍无推进即判本航点不可达，不必再等内部 10s 停滞计时。
+        # 同一目标 2s 窗口内的重复上报去重（planner 会连续刷同类事件）。
+        self.planner_unreach_win = 2.0
+        self._planner_unreach_t: Optional[float] = None
+        self._mission_event_sub = self.node.create_subscription(
+            String, "/mission_event", self._on_mission_event, 10)
 
         # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
         self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
@@ -197,6 +210,31 @@ class PerformActionManager:
         except (TypeError, ValueError):
             self._speed_ack_value = None
         self._speed_ack_event.set()
+
+    def _on_mission_event(self, msg):
+        """接收 /mission_event：记录 planner 的不可达上报，供航点等待循环开 2s 观察窗。
+
+        只认 source=planner 的三类真失效事件；同一目标 2s 窗口内的重复上报去重，
+        避免连续刷事件把不可达判定提前。自身发布的 STALLED 事件无 source，不会触发起算。
+        """
+        try:
+            data = json.loads(msg.data)
+        except Exception:
+            return
+        if data.get('event') != 'GOAL_UNREACHABLE':
+            return
+        if data.get('source', '') != 'planner':
+            return
+        reason = data.get('reason', '')
+        if reason not in ('OBSTACLE', 'PLAN_FAILED', 'REPLAN_FAILED'):
+            return
+        now = time.time()
+        with self._lock:
+            if (self._planner_unreach_t is not None and
+                    now - self._planner_unreach_t < self.planner_unreach_win):
+                return   # 2s 窗口内重复上报，去重（保留首次起算时刻）
+            self._planner_unreach_t = now
+        logger.warning(f'planner 上报目标不可达({reason})，{self.planner_unreach_win:.0f}s 内无恢复推进则判定不可达')
 
     def _ensure_speed(self, pos: Dict[str, Any]):
         """
@@ -378,10 +416,14 @@ class PerformActionManager:
                 logger.info(f"publish goal_pose_3d: {pose_msg} angle={math.degrees(yaw):.2f}")
 
                 # 2.等待是否到达目标点（含停滞 watchdog，避免 0918「悬停至耗尽电量」）
-                # 停滞判据：每 waypoint_progress_window 秒评估一次水平推进；
-                #   连续 waypoint_stall_time_s 秒无有效推进 → 判定本航点不可达（REACH_FAIL）。
-                # 返回码语义：success=False 且 message 前缀 GOAL_UNREACHABLE 表示「停滞不可达」，
+                # 两条不可达判据（任一满足即返回 GOAL_UNREACHABLE）：
+                #   a) planner 上报无解 → 2s 观察窗内仍无恢复推进（PLANNER_FAILED，响应快）
+                #   b) 内部推进量计时：每 waypoint_progress_window(2s) 采样一次，
+                #      累计 waypoint_stall_time_s(10s) 无推进（STALLED，兜底，避免降落对准被误判）
+                # 返回码语义：success=False 且 message 前缀 GOAL_UNREACHABLE 表示「不可达」，
                 #   由编排层(cruise)累计连续失败并决定 跳点/返航/迫降。
+                with self._lock:
+                    self._planner_unreach_t = None   # 新一次航点尝试，清空 planner 上报
                 st_stall_accum = 0.0          # 累计停滞秒数
                 st_last_dist = self._get_current_target_dist(x, y, z)
                 st_last_sample_t = time.time()
@@ -412,14 +454,35 @@ class PerformActionManager:
                         st_stall_accum = 0.0
                         st_last_dist = self._get_current_target_dist(x, y, z)
                         st_last_sample_t = time.time()
+                        with self._lock:
+                            self._planner_unreach_t = None   # 未起飞不做不可达判定，作废上报起算点
                         if not st_pause_logged:
                             logger.info(f'飞机尚未起飞，暂停停滞不可达判定, 目标坐标点: ({x}, {y}, {z})')
                             st_pause_logged = True
                         time.sleep(0.2)
                         continue
 
-                    # ---- 停滞 watchdog ----
+                    # ---- planner 上报不可达：2s 观察窗 ----
+                    # 规划器已自报无解，无需再等 10s 停滞计时；留 2s 给换轨/重规划恢复机会。
                     now_t = time.time()
+                    with self._lock:
+                        planner_unreach_t = self._planner_unreach_t
+                    if (planner_unreach_t is not None and
+                            now_t - planner_unreach_t >= self.planner_unreach_win):
+                        logger.error(f'planner 上报不可达后 {now_t - planner_unreach_t:.1f}s 仍无恢复推进，判定不可达: '
+                                     f'目标(x={x}, y={y}, z={z})')
+                        self._publish_mission_event(
+                            'GOAL_UNREACHABLE',
+                            reason='PLANNER_FAILED',
+                            goal_seq='NA',
+                            flight_epoch='NA',
+                            target=(f'{x:.2f},{y:.2f},{z:.2f}'))
+                        return {
+                            'success': False,
+                            'message': f'GOAL_UNREACHABLE: planner 上报不可达 (x={x}, y={y}, z={z})'
+                        }
+
+                    # ---- 停滞 watchdog ----
                     if st_last_sample_t is not None and now_t - st_last_sample_t >= self.waypoint_progress_window:
                         cur_dist = self._get_current_target_dist(x, y, z)
                         if cur_dist is None or st_last_dist is None:
@@ -444,6 +507,8 @@ class PerformActionManager:
                                     }
                             else:
                                 st_stall_accum = 0.0   # 有效推进，停滞累计清零
+                                with self._lock:
+                                    self._planner_unreach_t = None   # 已恢复推进，作废 planner 上报
                             st_last_dist = cur_dist
                         st_last_sample_t = now_t
 
