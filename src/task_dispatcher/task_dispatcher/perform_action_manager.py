@@ -77,6 +77,9 @@ class PerformActionManager:
         self.waypoint_stall_time_s = 10.0         # 累计 10s 无推进 → 判定不可达
         self.waypoint_progress_window = 2.0       # 横滚窗口，每 2s 评估一次推进
         self.waypoint_min_progress = 0.10         # 2s 内须推进 >= 0.10m，否则停滞计数+1
+        # 降落末段（目标 z≈0 且水平已对准）走 SZD 慢速垂直下降，该阶段没有水平推进，
+        # 水平判据必然误判停滞，改用更长的落地兜底时长（0.2m/s 从 2m 到地面约需 10s）
+        self.landing_stall_time_s = 60.0
 
         # ---- planner 侧不可达上报（/mission_event）----
         # 规划器自报无解(OBSTACLE / PLAN_FAILED / REPLAN_FAILED)比"推进量"更权威：
@@ -489,9 +492,14 @@ class PerformActionManager:
                             pass  # 位置暂不可得，本轮不判定，保持采样
                         else:
                             progressed = st_last_dist - cur_dist   # >0 表示在靠近
+                            # 降落末段：目标高度≈0 且水平已对准，此时只有 SZD 的垂直慢降，
+                            # 水平距离不会继续减小，用 10s 水平判据必然误判不可达并提前原地迫降。
+                            near_landing = (z <= 0.2 and cur_dist <= 1.0)
+                            stall_limit = (self.landing_stall_time_s if near_landing
+                                           else self.waypoint_stall_time_s)
                             if progressed < self.waypoint_min_progress:
                                 st_stall_accum += self.waypoint_progress_window
-                                if st_stall_accum >= self.waypoint_stall_time_s:
+                                if st_stall_accum >= stall_limit:
                                     logger.error(f'航点停滞 {st_stall_accum:.1f}s 无有效推进，判定不可达: '
                                                  f'目标(x={x}, y={y}, z={z})')
                                     # topic 互通：向编排层/外部广播不可达（字段按方案 §14，goal_seq/flight_epoch 由编排层累计）
