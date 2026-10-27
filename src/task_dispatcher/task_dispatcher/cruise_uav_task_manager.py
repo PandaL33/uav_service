@@ -101,6 +101,14 @@ class CruiseUavTaskManager:
         self.uav_command_sender = UavCommandSender(node, topic_name='/uav_command')
         # 机舱控制
         self.dock_control_client = DockControlClient(node)
+        # 降落后「闭合推杆 → 打开充电」串行线程（与点云上传并行执行）
+        self._dock_seq_lock = threading.Lock()
+        self._dock_seq_thread: Optional[threading.Thread] = None
+        self._dock_seq_triggered = False
+        # 每 60s 巡检：推杆已闭合但未在充电 → 补发一次打开充电
+        if ENABLE_DOCK_CONTROL:
+            threading.Thread(target=self._dock_charge_watchdog_loop, daemon=True,
+                             name='dock_charge_watchdog').start()
         # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
         self.map_save_client = self.node.create_client(Trigger, '/map_save')
         # 自检
@@ -1136,18 +1144,10 @@ class CruiseUavTaskManager:
             
             # 巡检任务完成,停止录像
             # self.rtst_record_manager.stop_recording()
-            # 处理点云数据
+            # 处理点云数据（开始上传时已并行触发「闭合推杆 → 打开充电」，此处不再等待上传完成）
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
-            
-            time.sleep(1)
-            
-            if ENABLE_DOCK_CONTROL:
-                 # 任务完成
-                try:
-                    self.dock_control_client.land_charge_sequence()
-                except Exception as e:
-                    logger.error(f'降落序列执行异常: {str(e)}')
-
+            # 未触发点云上传时（如 savePointCloud=False 或点云保存失败），补触发一次闭合推杆/充电
+            self._start_dock_close_charge()
 
             logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
             self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
@@ -1275,8 +1275,72 @@ class CruiseUavTaskManager:
             self.is_executing = False
             self.current_task_id = None
             self.cruises = []
+        # 下一次任务重新触发降落后推杆/充电流程
+        with self._dock_seq_lock:
+            self._dock_seq_triggered = False
         self.ros_topic_subscriber.set_cruises(self.cruises)
         self.perform_action_manager.set_stop_action(False)
+
+    def _start_dock_close_charge(self):
+        """
+        异步执行降落后的「闭合推杆 → 打开充电」，与点云上传并行，不阻塞上传;
+        每个任务只触发一次。
+        """
+        if not ENABLE_DOCK_CONTROL:
+            return
+        with self._dock_seq_lock:
+            if self._dock_seq_triggered:
+                return
+            self._dock_seq_triggered = True
+            self._dock_seq_thread = threading.Thread(
+                target=self._dock_close_charge_worker, daemon=True,
+                name='dock_close_charge')
+            self._dock_seq_thread.start()
+
+    def _dock_close_charge_worker(self):
+        try:
+            success, msg = self.dock_control_client.land_charge_sequence()
+            if success:
+                logger.info(f'降落后闭合推杆并充电: {msg}')
+            else:
+                logger.error(f'降落后闭合推杆并充电失败: {msg}，等待每分钟充电巡检兜底')
+        except Exception as e:
+            logger.error(f'降落后闭合推杆并充电异常: {str(e)}')
+
+    def _is_dock_charging(self) -> bool:
+        """依据飞控电池状态判断是否已充上电（电流为负＝充电中；电量已满视为无需补发）"""
+        battery = self.ros_topic_subscriber.get_battery_status()
+        if battery is None:
+            # 未收到电池数据，无法判断，本轮不补发充电
+            return True
+        if battery.current_a < 0.0:
+            return True
+        return battery.remaining >= 0.99
+
+    def _dock_charge_watchdog_loop(self):
+        """每 60s 巡检一次：推杆已闭合但未在充电时，补发一次打开充电"""
+        while True:
+            time.sleep(60)
+            try:
+                self._check_dock_charge()
+            except Exception as e:
+                logger.error(f'充电状态巡检异常: {str(e)}')
+
+    def _check_dock_charge(self):
+        # 任务执行中（含起飞、飞行、降落）不做干预
+        if self.is_executing:
+            return
+        # 降落后推杆/充电流程仍在执行，避免重复下发
+        if self._dock_seq_thread is not None and self._dock_seq_thread.is_alive():
+            return
+        if not self.dock_control_client.query_putter_closed():
+            return
+        if self._is_dock_charging():
+            return
+        logger.info('充电巡检: 推杆已闭合且未在充电，发送一次打开充电')
+        success, msg = self.dock_control_client.open_charge_once()
+        if not success:
+            logger.error(f'充电巡检: 打开充电失败: {msg}')
     
     def _handle_action_failure(self, task_id, on_failed_config=None, default_action='skip'):
         """
@@ -1542,7 +1606,9 @@ class CruiseUavTaskManager:
             else:
                 logger.error(f"点云文件持久化失败")
             
-            # 7. 上传点云文件到文件服务器（带重试机制）
+            # 7. 开始上传点云的同时闭合推杆，推杆闭合后发送一次充电（与上传并行，不阻塞上传）
+            self._start_dock_close_charge()
+            # 上传点云文件到文件服务器（带重试机制）
             file_id = self.upload_point_cloud_with_retry(pcd_file_path)
             if file_id:
                 logger.info(f"点云文件上传成功，文件ID: {file_id}")

@@ -50,6 +50,8 @@ class DockControlClient:
         
         self.putter_progress = 0
         self.putter_status = 'idle'
+        # 推杆闭合状态：由最近一次开/合指令的执行结果维护，None 表示状态未知
+        self.putter_closed = None
         
         self.charge_progress = 0
         self.charge_status = 'idle'
@@ -232,6 +234,7 @@ class DockControlClient:
         success, msg = self.wait_for_operation('putter')
         if not success:
             return False, f"推杆展开未到位: {msg}" 
+        self.putter_closed = False
         
         alarm_msg = Int32() 
         alarm_msg.data = 3 #无人机起飞告警
@@ -258,6 +261,7 @@ class DockControlClient:
         success, msg = self.wait_for_operation('putter')
         if not success:
             return False, f"推杆闭合未到位: {msg}"
+        self.putter_closed = True
         
         # 3. 关闭舱盖
         logger.info("步骤 3: 关闭舱盖")
@@ -292,7 +296,7 @@ class DockControlClient:
         
     def land_charge_sequence(self) -> tuple[bool, str]:
         """
-        执行降落后充电
+        执行降落后充电：闭合推杆，检测到闭合后发送一次打开充电（不等待充电到位反馈）
         返回: (bool: 是否成功, str: 状态消息)
         """
         # 1. 闭合推杆
@@ -306,21 +310,29 @@ class DockControlClient:
         success, msg = self.wait_for_operation('putter')
         if not success:
             return False, f"推杆闭合未到位: {msg}"
+        self.putter_closed = True
         
-        # 3. 打开充电
-        logger.info("步骤 3: 打开充电")
+        # 3. 打开充电（仅下发一次，不做充电到位闭环检测；未充上由每分钟充电巡检兜底）
+        logger.info("步骤 3: 打开充电（不等待充电到位反馈）")
         success, msg = self.call_service(self.charge_open_client, 'charge_open')
         if not success:
             return False, f"打开充电失败: {msg}"
-        
-        # 4. 等待充电打开
-        logger.info("步骤 4: 等待充电打开")
-        success, msg = self.wait_for_operation('charge')
-        if not success:
-            return False, f"打开充电未到位: {msg}"
             
-        logger.info(">>> 降落充电完成！")
-        return True, "降落充电执行成功"
+        logger.info(">>> 降落后闭合推杆并发送充电完成！")
+        return True, "推杆已闭合，充电指令已发送"
+
+    def query_putter_closed(self) -> bool:
+        """
+        查询推杆是否已闭合
+        说明：机库仅上报操作进度，不提供独立的状态查询服务，故以最近一次开/合指令的
+        执行结果为准；状态未知（进程刚启动）时按未闭合处理。
+        """
+        return self.putter_closed is True
+
+    def open_charge_once(self) -> tuple[bool, str]:
+        """发送一次打开充电指令（不等待充电到位反馈）"""
+        logger.info("发送一次打开充电")
+        return self.call_service(self.charge_open_client, 'charge_open')
     
     def call_uav_hangar_control_service(self, act_name):
         logger.info(f"收到{act_name}指令")
@@ -359,6 +371,7 @@ class DockControlClient:
             success, msg = self.wait_for_operation('putter')
             if not success:
                 return False, f"推杆闭合未到位: {msg}" 
+            self.putter_closed = True
         elif act_name == "putter_open":
             logger.info("推杆展开")
             success, msg = self.call_service(self.putter_open_client, 'putter_open')
@@ -369,6 +382,7 @@ class DockControlClient:
             success, msg = self.wait_for_operation('putter')
             if not success:
                 return False, f"推杆展开未到位: {msg}" 
+            self.putter_closed = False
         elif act_name == "drone_open":
             success, msg = self.call_service(self.drone_open_client, 'drone_open')
             if not success:
