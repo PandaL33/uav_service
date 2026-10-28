@@ -1257,7 +1257,8 @@ class CruiseUavTaskManager:
                 #       logger.error(f'降落序列执行异常: {str(e)}')
                 #        dock_status, dock_msg = False, str(e)
                         
-                # 关闭导航服务
+                # 关闭导航服务（兜底：点云已保存时 process_point_cloud_data 中已提前关闭，
+                # 这里覆盖 savePointCloud=False / 点云保存失败等未提前关闭的情况，stop 幂等）
                 logger.info('停止ego_planner.service服务...')
                 subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
                 logger.info('停止ego_planner.service服务操作完成')
@@ -1588,6 +1589,11 @@ class CruiseUavTaskManager:
             if not os.path.exists(pcd_file_path):
                 logger.error(f"点云文件不存在: {pcd_file_path}")
                 return ''
+
+            # 点云已落盘，导航链路不再需要，立即关闭 ego_planner，不必等后续持久化/上传完成
+            logger.info('停止ego_planner.service服务...')
+            subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
+            logger.info('停止ego_planner.service服务操作完成')
             
             # 持久化点云文件和记录
             task_id = self.current_task_id if hasattr(self, 'current_task_id') and self.current_task_id else 'unknown_task'
