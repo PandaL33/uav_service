@@ -141,8 +141,9 @@ class DockControlClient:
                 logger.error(msg)
                 return False, msg
             
-            # 让出控制权，处理回调
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+            # 让出控制权；节点由主线程的 executor spin，此处不能再次 spin（并发 spin 同一节点
+            # 会触发 rclpy "wait set index too big"）
+            time.sleep(0.1)
         
         # 获取结果
         try:
@@ -187,8 +188,8 @@ class DockControlClient:
                 if self.charge_status == 'ok' and self.charge_progress == 100:
                     logger.info(f"{operation_type}操作完成")
                     return True, f"{operation_type}操作完成"  
-            # 短暂等待
-            rclpy.spin_once(self.node, timeout_sec=0.2)
+            # 短暂等待；进度由主线程 executor 的回调更新，此处不能再次 spin 同一节点
+            time.sleep(0.2)
         
         return False, "节点关闭"
 

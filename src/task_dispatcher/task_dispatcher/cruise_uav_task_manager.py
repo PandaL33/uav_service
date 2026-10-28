@@ -105,6 +105,8 @@ class CruiseUavTaskManager:
         self._dock_seq_lock = threading.Lock()
         self._dock_seq_thread: Optional[threading.Thread] = None
         self._dock_seq_triggered = False
+        # 已降落并进入点云上传阶段：此阶段允许充电巡检介入（任务尚未结束，is_executing 仍为 True）
+        self._post_landing_phase = False
         # 每 3 分钟补发一次打开充电
         if ENABLE_DOCK_CONTROL:
             threading.Thread(target=self._dock_charge_watchdog_loop, daemon=True,
@@ -1278,6 +1280,7 @@ class CruiseUavTaskManager:
         # 下一次任务重新触发降落后推杆/充电流程
         with self._dock_seq_lock:
             self._dock_seq_triggered = False
+        self._post_landing_phase = False
         self.ros_topic_subscriber.set_cruises(self.cruises)
         self.perform_action_manager.set_stop_action(False)
 
@@ -1317,8 +1320,8 @@ class CruiseUavTaskManager:
                 logger.error(f'充电状态巡检异常: {str(e)}')
 
     def _check_dock_charge(self):
-        # 任务执行中（含起飞、飞行、降落）不做干预
-        if self.is_executing:
+        # 任务执行中（含起飞、飞行、降落）不做干预；已降落进入点云上传阶段例外
+        if self.is_executing and not self._post_landing_phase:
             logger.info('充电巡检: 任务执行中，跳过')
             return
         # 降落后推杆/充电流程仍在执行，避免重复下发
@@ -1595,6 +1598,7 @@ class CruiseUavTaskManager:
                 logger.error(f"点云文件持久化失败")
             
             # 7. 开始上传点云的同时闭合推杆，推杆闭合后发送一次充电（与上传并行，不阻塞上传）
+            self._post_landing_phase = True
             self._start_dock_close_charge()
             # 上传点云文件到文件服务器（带重试机制）
             file_id = self.upload_point_cloud_with_retry(pcd_file_path)
