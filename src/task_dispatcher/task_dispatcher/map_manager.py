@@ -195,44 +195,62 @@ class MapManager:
     def update_pcd_map(self, map_file_id: str, map_file_uri: str) -> bool:
         """
         更新地图，从服务器下载地图文件
-        
+
+        本地按 mapFileId 命名缓存为 {map_file_id}.pcd，同名文件已存在时跳过下载；
+        下游（定位模块）读取的固定路径 3dmap.pcd 指向本次使用的地图。
+
         Args:
             map_file_id: 地图文件ID
             map_file_uri: 地图文件URI
-            
+
         Returns:
             bool: 更新是否成功
         """
         try:
             logger.info(f'开始更新pcd地图: {map_file_id}')
-            
-            # 构建下载URL
-            download_url = f'{self.server_url}/file/{map_file_uri}'
-            logger.info(f'下载pcd地图URL: {download_url}')
-            
-            # 下载地图文件（假设返回的是PNG格式）
-            response = requests.get(
-                download_url,
-                stream=True,
-                timeout=30,  # 设置超时时间
-                verify=False  # 忽略SSL证书验证，生产环境建议启用
-            )
-            
-            if response.status_code != 200:
-                logger.error(f'下载地图失败，HTTP状态码: {response.status_code}')
-                return False
-            
-            # 保存PNG文件
-            png_map_path = os.path.join(self.pcd_map_folder, f'3dmap.pcd')
-            with open(png_map_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            logger.info(f'地图pcd文件已保存: {png_map_path}')
-            
+
+            map_path = os.path.join(self.pcd_map_folder, f'{map_file_id}.pcd')
+            active_path = os.path.join(self.pcd_map_folder, '3dmap.pcd')
+
+            if os.path.exists(map_path) and os.path.getsize(map_path) > 0:
+                logger.info(f'本地已存在同名地图文件，跳过下载: {map_path}')
+            else:
+                # 构建下载URL
+                download_url = f'{self.server_url}/file/{map_file_uri}'
+                logger.info(f'下载pcd地图URL: {download_url}')
+
+                response = requests.get(
+                    download_url,
+                    stream=True,
+                    timeout=30,  # 设置超时时间
+                    verify=False  # 忽略SSL证书验证，生产环境建议启用
+                )
+
+                if response.status_code != 200:
+                    logger.error(f'下载地图失败，HTTP状态码: {response.status_code}')
+                    return False
+
+                # 先写临时文件，下载完整后再改名，避免中断留下半截文件
+                tmp_path = f'{map_path}.part'
+                with open(tmp_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                os.replace(tmp_path, map_path)
+
+                logger.info(f'地图pcd文件已保存: {map_path}')
+
+            # 固定路径 3dmap.pcd 指向本次使用的地图（原子替换，避免下游读到中间状态）
+            if os.path.realpath(active_path) != os.path.realpath(map_path):
+                tmp_link = f'{active_path}.link'
+                if os.path.lexists(tmp_link):
+                    os.remove(tmp_link)
+                os.symlink(map_path, tmp_link)
+                os.replace(tmp_link, active_path)
+                logger.info(f'已将 3dmap.pcd 指向: {map_path}')
+
             return True
-            
+
         except requests.RequestException as e:
             logger.error(f'下载pcd地图时网络错误: {str(e)}')
             return False
