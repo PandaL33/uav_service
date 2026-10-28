@@ -105,7 +105,7 @@ class CruiseUavTaskManager:
         self._dock_seq_lock = threading.Lock()
         self._dock_seq_thread: Optional[threading.Thread] = None
         self._dock_seq_triggered = False
-        # 每 3 分钟巡检：未在充电 → 补发一次打开充电
+        # 每 3 分钟补发一次打开充电
         if ENABLE_DOCK_CONTROL:
             threading.Thread(target=self._dock_charge_watchdog_loop, daemon=True,
                              name='dock_charge_watchdog').start()
@@ -1303,22 +1303,12 @@ class CruiseUavTaskManager:
             if success:
                 logger.info(f'降落后闭合推杆并充电: {msg}')
             else:
-                logger.error(f'降落后闭合推杆并充电失败: {msg}，等待每分钟充电巡检兜底')
+                logger.error(f'降落后闭合推杆并充电失败: {msg}，等待充电巡检兜底')
         except Exception as e:
             logger.error(f'降落后闭合推杆并充电异常: {str(e)}')
 
-    def _is_dock_charging(self) -> bool:
-        """依据飞控电池状态判断是否已充上电（电流为负＝充电中；电量已满视为无需补发）"""
-        battery = self.ros_topic_subscriber.get_battery_status()
-        if battery is None:
-            # 未收到电池数据，无法判断，本轮不补发充电
-            return True
-        if battery.current_a < 0.0:
-            return True
-        return battery.remaining >= 0.99
-
     def _dock_charge_watchdog_loop(self):
-        """每 3 分钟巡检一次：未在充电时，补发一次打开充电"""
+        """每 3 分钟巡检一次：补发一次打开充电"""
         while True:
             time.sleep(180)
             try:
@@ -1335,15 +1325,7 @@ class CruiseUavTaskManager:
         if self._dock_seq_thread is not None and self._dock_seq_thread.is_alive():
             logger.info('充电巡检: 推杆/充电流程执行中，跳过')
             return
-        if self._is_dock_charging():
-            battery = self.ros_topic_subscriber.get_battery_status()
-            if battery is None:
-                logger.info('充电巡检: 未收到电池数据，跳过')
-            else:
-                logger.info(f'充电巡检: 已充上电或电量已满'
-                            f'（current_a={battery.current_a:.2f}, remaining={battery.remaining:.2f}），跳过')
-            return
-        logger.info('充电巡检: 未在充电，发送一次打开充电')
+        logger.info('充电巡检: 发送一次打开充电')
         success, msg = self.dock_control_client.open_charge_once()
         if not success:
             logger.error(f'充电巡检: 打开充电失败: {msg}')
