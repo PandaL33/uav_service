@@ -1217,7 +1217,10 @@ class CruiseUavTaskManager:
 
                     except Exception as e:
                         logger.error(f'起飞序列执行异常: {str(e)}')
-                        dock_status, dock_msg = False, str(e)
+                        # 机库动作异常必须中止任务，避免推杆/舱盖未就绪就起飞
+                        self._report_task_status(task_id, TaskStatus.ABORTED.value, f'起飞序列执行异常: {str(e)}')
+                        self.reset_status()
+                        return
 
                 # 起飞前状态检测
                 if ENABLE_PREFLIGHT_CHECK:

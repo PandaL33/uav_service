@@ -160,6 +160,15 @@ class DockControlClient:
             logger.error(msg)
             return False, msg
           
+    def _reset_progress(self, operation_type: str):
+        """下发指令前清空上一次操作的残留状态，避免 wait_for_operation 因旧状态立即返回"""
+        if operation_type == 'cover':
+            self.cover_status, self.cover_progress = 'idle', 0
+        elif operation_type == 'putter':
+            self.putter_status, self.putter_progress = 'idle', 0
+        elif operation_type == 'charge':
+            self.charge_status, self.charge_progress = 'idle', 0
+
     def wait_for_operation(self, operation_type: str, timeout: float = 60.0):
         """
         等待操作完成
@@ -213,6 +222,7 @@ class DockControlClient:
         
         # 2. 打开舱盖
         logger.info("步骤 2: 打开舱盖")
+        self._reset_progress('cover')
         success, msg = self.call_service(self.cover_open_client, 'cover_open')
         if not success:
             return False, f"打开舱盖失败: {msg}"
@@ -225,6 +235,7 @@ class DockControlClient:
             
         # 4. 展开推杆
         logger.info("步骤 4: 展开推杆")
+        self._reset_progress('putter')
         success, msg = self.call_service(self.putter_open_client, 'putter_open')
         if not success:
             # 这里就是你要求的错误返回
@@ -302,6 +313,7 @@ class DockControlClient:
         """
         # 1. 闭合推杆
         logger.info("步骤 1: 闭合推杆")
+        self._reset_progress('putter')
         success, msg = self.call_service(self.putter_close_client, 'putter_close')
         if not success:
             return False, f"闭合推杆失败: {msg}"
@@ -315,6 +327,7 @@ class DockControlClient:
         
         # 3. 打开充电（仅下发一次，不做充电到位闭环检测；未充上由每分钟充电巡检兜底）
         logger.info("步骤 3: 打开充电（不等待充电到位反馈）")
+        self._reset_progress('charge')
         success, msg = self.call_service(self.charge_open_client, 'charge_open')
         if not success:
             return False, f"打开充电失败: {msg}"
