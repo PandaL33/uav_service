@@ -1329,13 +1329,22 @@ class CruiseUavTaskManager:
     def _check_dock_charge(self):
         # 任务执行中（含起飞、飞行、降落）不做干预
         if self.is_executing:
+            logger.info('充电巡检: 任务执行中，跳过')
             return
         # 降落后推杆/充电流程仍在执行，避免重复下发
         if self._dock_seq_thread is not None and self._dock_seq_thread.is_alive():
+            logger.info('充电巡检: 推杆/充电流程执行中，跳过')
             return
         if not self.dock_control_client.query_putter_closed():
+            logger.info(f'充电巡检: 推杆未闭合（状态={self.dock_control_client.putter_closed}），跳过')
             return
         if self._is_dock_charging():
+            battery = self.ros_topic_subscriber.get_battery_status()
+            if battery is None:
+                logger.info('充电巡检: 未收到电池数据，跳过')
+            else:
+                logger.info(f'充电巡检: 已充上电或电量已满'
+                            f'（current_a={battery.current_a:.2f}, remaining={battery.remaining:.2f}），跳过')
             return
         logger.info('充电巡检: 推杆已闭合且未在充电，发送一次打开充电')
         success, msg = self.dock_control_client.open_charge_once()
