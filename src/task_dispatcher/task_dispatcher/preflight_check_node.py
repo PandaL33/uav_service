@@ -155,7 +155,7 @@ class PreFlightCheckNode():
         result['details']['current_a'] = f'{self.topic_subscriber.get_battery_status().current_a:.2f}A'
         
         # 最低电量阈值（百分比）- 低于 95% 不能起飞
-        min_battery = 95.0
+        min_battery = 40.0
         
         if battery_remaining >= min_battery:
             result['passed'] = True
