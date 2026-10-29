@@ -1161,8 +1161,14 @@ class CruiseUavTaskManager:
             # 处理点云数据（开始上传时已并行触发「闭合推杆 → 打开充电」，此处不再等待上传完成）
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
             # 未触发点云上传时（如 savePointCloud=False 或点云保存失败），补触发一次闭合推杆/充电
-            self._start_dock_close_charge()
-
+            # self._start_dock_close_charge()
+            if ENABLE_DOCK_CONTROL:               
+                try:
+                    dock_status, dock_msg = self.dock_control_client.land_sequence()
+                except Exception as e:
+                    logger.error(f'降落序列执行异常: {str(e)}')
+                    dock_status, dock_msg = False, str(e)
+                        
             logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
             self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
             
@@ -1261,15 +1267,7 @@ class CruiseUavTaskManager:
                 # 执行巡检任务    
                 self._processing_cruise_task(task_id, body)
                 
-                #if ENABLE_DOCK_CONTROL:
-                    # 任务完成
-                #    try:
-                #        dock_status, dock_msg = self.dock_control_client.land_sequence()
-                        
-                #    except Exception as e:
-                #       logger.error(f'降落序列执行异常: {str(e)}')
-                #        dock_status, dock_msg = False, str(e)
-                        
+                
                 # 关闭导航服务（兜底：点云已保存时 process_point_cloud_data 中已提前关闭，
                 # 这里覆盖 savePointCloud=False / 点云保存失败等未提前关闭的情况）
                 self._stop_ego_planner_service()
