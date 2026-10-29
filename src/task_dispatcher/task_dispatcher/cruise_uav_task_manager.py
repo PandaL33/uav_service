@@ -36,7 +36,7 @@ from task_dispatcher.preflight_check_node import PreFlightCheckNode
 from task_dispatcher.uav_action_manager import UavActionManager
 from auth_utils import AuthManager
 from task_dispatcher.pcd_chunk_upload import FileChunkUploader
-
+import open3d as o3d
 # 配置日志
 logger = logging.getLogger('task_dispatcher.cruise_uav_task_manager')
 
@@ -1601,6 +1601,11 @@ class CruiseUavTaskManager:
 
             # 点云已落盘，导航链路不再需要，立即关闭 ego_planner，不必等后续持久化/上传完成
             self._stop_ego_planner_service()
+            
+            # 点云降采样
+            pcd = o3d.io.read_point_cloud(pcd_file_path)
+            down_pcd = pcd.voxel_down_sample(0.05)
+            o3d.io.write_point_cloud(pcd_file_path, down_pcd)
             
             # 持久化点云文件和记录
             task_id = self.current_task_id if hasattr(self, 'current_task_id') and self.current_task_id else 'unknown_task'
