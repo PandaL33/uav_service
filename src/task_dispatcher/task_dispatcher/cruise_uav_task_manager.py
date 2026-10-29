@@ -105,6 +105,8 @@ class CruiseUavTaskManager:
         self._dock_seq_lock = threading.Lock()
         self._dock_seq_thread: Optional[threading.Thread] = None
         self._dock_seq_triggered = False
+        # 导航服务是否已停止（点云落盘后提前停止，任务收尾兜底时不重复执行）
+        self._ego_planner_stopped = False
         # 已降落并进入点云上传阶段：此阶段允许充电巡检介入（任务尚未结束，is_executing 仍为 True）
         self._post_landing_phase = False
         # 每 3 分钟补发一次打开充电
@@ -647,6 +649,16 @@ class CruiseUavTaskManager:
             logger.info('[即时指令] 已发布 /stop_planning，planner 停止轨迹发送')
         except Exception as e:
             logger.error(f'[即时指令] 发布 /stop_planning 失败: {e}')
+
+    def _stop_ego_planner_service(self):
+        """停止导航服务（幂等）：点云落盘后调用一次，任务收尾再调一次不会重复执行。"""
+        if self._ego_planner_stopped:
+            logger.info('ego_planner.service 已停止，跳过重复停止')
+            return
+        self._ego_planner_stopped = True
+        logger.info('停止ego_planner.service服务...')
+        subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
+        logger.info('停止ego_planner.service服务操作完成')
 
     def _wait_landed(self, timeout: float) -> bool:
         """等 PX4 落定上锁（arming_state=DISARMED）。上锁由 comms 的落地检测流程负责，
@@ -1243,6 +1255,7 @@ class CruiseUavTaskManager:
                 
                 logger.info('启动ego_planner.service服务...')
                 subprocess.run(['sudo', 'systemctl', 'start', 'ego_planner.service'], timeout=120)
+                self._ego_planner_stopped = False
                 logger.info('启动ego_planner.service服务操作完成')
                 
                 # 执行巡检任务    
@@ -1258,10 +1271,8 @@ class CruiseUavTaskManager:
                 #        dock_status, dock_msg = False, str(e)
                         
                 # 关闭导航服务（兜底：点云已保存时 process_point_cloud_data 中已提前关闭，
-                # 这里覆盖 savePointCloud=False / 点云保存失败等未提前关闭的情况，stop 幂等）
-                logger.info('停止ego_planner.service服务...')
-                subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
-                logger.info('停止ego_planner.service服务操作完成')
+                # 这里覆盖 savePointCloud=False / 点云保存失败等未提前关闭的情况）
+                self._stop_ego_planner_service()
                 
             else:
                 logger.info(f"机器人类型为{ROBOT_TYPE},不执行巡检任务task_id={task_id}")
@@ -1591,9 +1602,7 @@ class CruiseUavTaskManager:
                 return ''
 
             # 点云已落盘，导航链路不再需要，立即关闭 ego_planner，不必等后续持久化/上传完成
-            logger.info('停止ego_planner.service服务...')
-            subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
-            logger.info('停止ego_planner.service服务操作完成')
+            self._stop_ego_planner_service()
             
             # 持久化点云文件和记录
             task_id = self.current_task_id if hasattr(self, 'current_task_id') and self.current_task_id else 'unknown_task'
