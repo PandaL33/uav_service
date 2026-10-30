@@ -1604,8 +1604,14 @@ class CruiseUavTaskManager:
             
             # 点云降采样
             pcd = o3d.io.read_point_cloud(pcd_file_path)
+            origin_points = len(pcd.points)
+            origin_size = os.path.getsize(pcd_file_path)
+            logger.info(f"点云降采样前: 点数={origin_points}, 文件大小={origin_size / 1024 / 1024:.2f}MB ({origin_size}字节)")
             down_pcd = pcd.voxel_down_sample(0.05)
             o3d.io.write_point_cloud(pcd_file_path, down_pcd)
+            down_points = len(down_pcd.points)
+            down_size = os.path.getsize(pcd_file_path)
+            logger.info(f"点云降采样后: 点数={down_points}, 文件大小={down_size / 1024 / 1024:.2f}MB ({down_size}字节)")
             
             # 持久化点云文件和记录
             task_id = self.current_task_id if hasattr(self, 'current_task_id') and self.current_task_id else 'unknown_task'
