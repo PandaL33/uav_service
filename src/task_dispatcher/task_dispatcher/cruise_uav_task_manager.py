@@ -291,6 +291,28 @@ class CruiseUavTaskManager:
         # 4) 尚未达连续上限，跳过本航点继续下一航点（外层循环自然 continue）
         return False
 
+    def _handle_move_failure(self, task_id: str) -> bool:
+        """移动动作「非不可达」失败后的收尾。返回 True=已进入返航/迫降链路。
+
+        与「连续多点不可达」共用同一条收尾链路（沿线返航，受阻则迫降兜底）：
+          - 已起飞：按已到达的关键点沿线退回，落地后做机库收尾；
+          - 未起飞：直接取消，绝不触发任何起飞动作，只做机库收尾（闭合推杆/关盖）。
+        """
+        if not self.perform_action_manager._is_airborne():
+            logger.error(f'[中止] task={task_id} 飞机未起飞，取消任务并回滚机库')
+            self._dock_rollback_after_takeoff_failure(task_id)
+            return False
+        logger.error(f'[中止] task={task_id} 移动动作失败，按连续不可达同样的沿线返航处理')
+        self._publish_mission_event(
+            'RETURN_INIT',
+            goal_seq=self.goal_seq_counter,
+            flight_epoch=getattr(self, 'flight_epoch', 'NA'),
+            consec_goals=self.consec_goals,
+            trigger='MOVE_FAILED')
+        params = {'land_timeout': 60.0, 'route_max_points': 0}
+        self._return_home_along_route(task_id, params)
+        return True
+
     def _return_to_origin(self, task_id: str) -> bool:
         """返航回原点；返航途中遇障无法推进 → RETURN_BLOCKED 并转迫降兜底。"""
         self._publish_mission_event(
@@ -599,6 +621,7 @@ class CruiseUavTaskManager:
         # 到达 (0,0,1) 后发 (0,0,0)：复用现有返航收尾（SZD 安全区自动降落，含受阻迫降）
         self._return_to_origin(action_id)
         if self._wait_landed(params['land_timeout']):
+            self._dock_land_sequence('返航落地', action_id)
             return TaskStatus.COMPLETED.value, 'RTL_DONE 已回原点并降落上锁'
         self.uav_action_manager.disarm()
         return TaskStatus.ABORTED.value, f'已回原点但 {params["land_timeout"]}s 内未确认落地，已补发上锁命令'
@@ -1116,9 +1139,14 @@ class CruiseUavTaskManager:
                             if not self.is_executing or self.current_task_id != task_id:
                                 logger.info(f'任务{task_id}已被平台指令中止或替换，退出航线执行')
                                 return
-                            # 其他失败（非不可达）→ 按原逻辑中止任务
-                            logger.error(f'移动动作执行失败，已停止: {msg}')
-                            self._report_task_status(task_id, TaskStatus.ABORTED.value, '移动动作执行失败，已停止')
+                            # 其他失败（非不可达）→ 与「连续多点不可达」同一套收尾：
+                            # 已起飞则沿线返航（受阻迫降），未起飞直接取消并做机库收尾
+                            logger.error(f'移动动作执行失败，按失败收尾处理: {msg}')
+                            if self._handle_move_failure(task_id):
+                                self._report_task_status(task_id, TaskStatus.ABORTED.value,
+                                                         f'移动动作失败，已转入返航/迫降: {msg}')
+                            else:
+                                self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
                             self.rtst_record_manager.stop_recording()
                             return
 
@@ -1229,6 +1257,8 @@ class CruiseUavTaskManager:
                         
                         dock_status, dock_msg = self.dock_control_client.takeoff_sequence()
                         if not dock_status:
+                            # 起飞序列可能已开盖/展开推杆，失败必须把机库恢复到闭合状态
+                            self._dock_rollback_after_takeoff_failure(task_id)
                             self._report_task_status(task_id, TaskStatus.ABORTED.value, dock_msg)
                             self.reset_status()
                             return
@@ -1236,6 +1266,7 @@ class CruiseUavTaskManager:
                     except Exception as e:
                         logger.error(f'起飞序列执行异常: {str(e)}')
                         # 机库动作异常必须中止任务，避免推杆/舱盖未就绪就起飞
+                        self._dock_rollback_after_takeoff_failure(task_id)
                         self._report_task_status(task_id, TaskStatus.ABORTED.value, f'起飞序列执行异常: {str(e)}')
                         self.reset_status()
                         return
@@ -1248,21 +1279,29 @@ class CruiseUavTaskManager:
                     check_code, msg = self.preflight_check_node._start_check()
                     if check_code == 1:
                         logger.warning(msg)
+                        # 机库此时已开盖，自检不通过必须回滚，否则机舱一直敞着
+                        self._dock_rollback_after_takeoff_failure(task_id)
                         self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
                         self.reset_status()
                         return
                     
                 # 检查地图是否存在，如果不存在则进行更新
-                map_file_id = body['mapFileId']
-                map_file_uri = body['mapFileUri']
-                
-                rmap = self.map_manager.update_pcd_map(map_file_id, map_file_uri)
-                logger.info(f"更新pcd地图完成: {rmap}")
-                
-                logger.info('启动ego_planner.service服务...')
-                subprocess.run(['sudo', 'systemctl', 'start', 'ego_planner.service'], timeout=120)
-                self._ego_planner_stopped = False
-                logger.info('启动ego_planner.service服务操作完成')
+                # 开盖后的起飞前准备失败（地图/规划服务）同样需要回滚机库
+                try:
+                    map_file_id = body['mapFileId']
+                    map_file_uri = body['mapFileUri']
+
+                    rmap = self.map_manager.update_pcd_map(map_file_id, map_file_uri)
+                    logger.info(f"更新pcd地图完成: {rmap}")
+
+                    logger.info('启动ego_planner.service服务...')
+                    subprocess.run(['sudo', 'systemctl', 'start', 'ego_planner.service'], timeout=120)
+                    self._ego_planner_stopped = False
+                    logger.info('启动ego_planner.service服务操作完成')
+                except Exception as e:
+                    logger.error(f'起飞前准备失败: {str(e)}')
+                    self._dock_rollback_after_takeoff_failure(task_id)
+                    raise
                 
                 # 执行巡检任务    
                 self._processing_cruise_task(task_id, body)
@@ -1322,6 +1361,43 @@ class CruiseUavTaskManager:
                 logger.error(f'降落后闭合推杆并充电失败: {msg}，等待充电巡检兜底')
         except Exception as e:
             logger.error(f'降落后闭合推杆并充电异常: {str(e)}')
+
+    def _dock_land_sequence(self, reason: str, task_id: str = ''):
+        """机库降落收尾：闭合推杆 → 关闭舱盖 → 打开充电。
+
+        只用于「飞机确实回到机库内」的场合：正常完成、返航落地、起飞前失败回滚。
+        原地迫降（含返航受阻迫降、平台 land 指令）不适用——飞机不在机库内，
+        此时推杆/关盖没有意义，必须跳过。
+        """
+        if not ENABLE_DOCK_CONTROL:
+            return
+        try:
+            success, msg = self.dock_control_client.land_sequence()
+            if success:
+                logger.info(f'[机库收尾:{reason}] task={task_id} 完成: {msg}')
+            else:
+                logger.error(f'[机库收尾:{reason}] task={task_id} 失败: {msg}')
+        except Exception as e:
+            logger.error(f'[机库收尾:{reason}] task={task_id} 异常: {str(e)}')
+
+    def _dock_rollback_after_takeoff_failure(self, task_id: str = ''):
+        """起飞序列已执行但最终没能起飞时的机库回滚（闭合推杆 → 关舱盖 → 开充电）。
+
+        舱盖是 takeoff_sequence() 打开的，preflight 不过、地图/服务启动异常、
+        takeoff_sequence 自身失败等任何后续失败都必须把机库恢复到闭合状态。
+        若检测到飞机已解锁（可能已经起飞），跳过关盖，避免盖向机身。
+        """
+        if not ENABLE_DOCK_CONTROL:
+            return
+        try:
+            _, arming = self.ros_topic_subscriber.get_takeoff_time_and_arming_state()
+        except Exception as e:
+            logger.warning(f'[起飞收尾] 读取解锁状态失败，按未起飞处理: {e}')
+            arming = None
+        if arming == VehicleStatus.ARMING_STATE_ARMED:
+            logger.error(f'[起飞收尾] task={task_id} 飞机已解锁(可能已起飞)，跳过关盖，避免盖向机身')
+            return
+        self._dock_land_sequence('起飞前回滚', task_id)
 
     def _dock_charge_watchdog_loop(self):
         """每 3 分钟巡检一次：补发一次打开充电"""
