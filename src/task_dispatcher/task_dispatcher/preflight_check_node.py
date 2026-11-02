@@ -111,9 +111,9 @@ class PreFlightCheckNode():
             # 缓存数据由主线程 executor 的回调持续刷新，这里只轮询缓存值。
             # 不能在任务线程里再 spin 同一 node：会和主线程 rclpy.spin() 竞争，
             # 抛 ValueError: generator already executing，关机阶段还会打断主 spin。
+            # battery_status 不作为就绪条件：部分机型/仿真没有电池，PX4 也不发布该话题
             if (
-                self.topic_subscriber.get_vehicle_status() is not None and 
-                self.topic_subscriber.get_battery_status() is not None and 
+                self.topic_subscriber.get_vehicle_status() is not None and
                 self.topic_subscriber.get_failsafe_flags() is not None
             ):
                 return True
@@ -323,7 +323,9 @@ class PreFlightCheckNode():
         }
         
         if self.topic_subscriber.get_battery_status() is None:
-            result['message'] = '无电池状态数据'
+            # 部分机型/仿真没有电池，PX4 也不发布 battery_status，此时不阻断起飞
+            result['passed'] = True
+            result['message'] = '无电池状态数据（如仿真无电池），跳过电量检查'
             return result
             
         # BatteryStatus 消息中的剩余电量百分比 (0.0-1.0)
@@ -478,7 +480,6 @@ class PreFlightCheckNode():
             missing = [
                 label for label, getter in (
                     ('vehicle_status(/fmu/out/vehicle_status)', self.topic_subscriber.get_vehicle_status),
-                    ('battery_status(/fmu/out/battery_status)', self.topic_subscriber.get_battery_status),
                     ('failsafe_flags(/fmu/out/failsafe_flags)', self.topic_subscriber.get_failsafe_flags),
                 ) if getter() is None
             ]
