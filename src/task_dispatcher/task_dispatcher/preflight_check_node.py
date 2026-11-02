@@ -16,7 +16,7 @@
 """
 
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import logging
 
@@ -461,7 +461,7 @@ class PreFlightCheckNode():
         
         return all_passed
     
-    def check_report(self) -> list:
+    def check_report(self) -> Tuple[bool, list]:
         """
         获取结构化的检查报告列表
         
@@ -475,8 +475,18 @@ class PreFlightCheckNode():
         # 等待数据
         logger.info('等待数据更新...')
         if not self.wait_for_data(30):
-            logger.error('✗ 数据等待超时')
-            return False
+            missing = [
+                label for label, getter in (
+                    ('vehicle_status(/fmu/out/vehicle_status)', self.topic_subscriber.get_vehicle_status),
+                    ('battery_status(/fmu/out/battery_status)', self.topic_subscriber.get_battery_status),
+                    ('failsafe_flags(/fmu/out/failsafe_flags)', self.topic_subscriber.get_failsafe_flags),
+                ) if getter() is None
+            ]
+            message = '30s 内未收到 PX4 状态数据：' + ('、'.join(missing) if missing else '未知')
+            logger.error(f'✗ 数据等待超时：{message}')
+            # 超时也必须保持 (passed, report) 二元组契约，否则调用方解包抛 TypeError 会掩盖真实原因
+            self.check_results['data'] = {'passed': False, 'message': message, 'details': {}}
+            return False, [{'key': 'data', 'label': '数据等待', 'value': message, 'unit': ''}]
             
         logger.info('✓ 数据接收正常')
         
