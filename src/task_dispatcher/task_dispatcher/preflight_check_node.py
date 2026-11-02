@@ -15,7 +15,6 @@
 7. 输出详细的检测报告
 """
 
-import rclpy
 import time
 from typing import Optional, Dict, Any
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
@@ -109,14 +108,17 @@ class PreFlightCheckNode():
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+            # 缓存数据由主线程 executor 的回调持续刷新，这里只轮询缓存值。
+            # 不能在任务线程里再 spin 同一 node：会和主线程 rclpy.spin() 竞争，
+            # 抛 ValueError: generator already executing，关机阶段还会打断主 spin。
             if (
                 self.topic_subscriber.get_vehicle_status() is not None and 
                 self.topic_subscriber.get_battery_status() is not None and 
                 self.topic_subscriber.get_failsafe_flags() is not None
             ):
                 return True
-                
+            time.sleep(0.1)
+
         return False
 
     def check_communication(self) -> Dict[str, Any]:
