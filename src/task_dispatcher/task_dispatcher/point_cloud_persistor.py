@@ -259,13 +259,15 @@ class PointCloudPersistor:
                 logger.error(f'上传点云文件异常: {str(e)}，记录ID: {record_id}')
                 self._update_record_status(record_id, 'pending')
     
-    def _upload_point_cloud(self, pcd_file_path: str, is_retry: bool = False) -> Optional[str]:
+    def _upload_point_cloud(self, pcd_file_path: str, is_retry: bool = False,
+                            task_id: Optional[str] = None) -> Optional[str]:
         """
         上传点云文件到文件服务器
         
         Args:
             pcd_file_path: 点云文件路径
             is_retry: 是否为重试上传，默认False
+            task_id: 关联任务ID，重试上传时传入，默认None
             
         Returns:
             Optional[str]: 文件ID，上传失败返回None
