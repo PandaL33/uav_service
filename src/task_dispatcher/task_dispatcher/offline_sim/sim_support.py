@@ -59,7 +59,6 @@ def bootstrap_sys_path() -> None:
 
 SIM_CONFIG_OVERRIDES: Dict[str, Any] = {
     'ROBOT_TYPE': 'uav',              # 与在线一致，走无人机分支（含 /fmu/out 状态订阅）
-    'ENABLE_PREFLIGHT_CHECK': False,  # 自检依赖机载设备话题
     'ENABLE_DOCK_CONTROL': False,     # 仿真无机舱
     'ENABLE_MANUAL_CONTROL': False,   # 自动执行航线，不等待人工起降
     'CAMERA01_URL': '',               # 无 RTSP 相机
@@ -70,6 +69,14 @@ SIM_CONFIG_OVERRIDES: Dict[str, Any] = {
     'PCD_FILE_PATH': '/tmp/uav_offline_sim/test.pcd',
     'PCD_FILE_COMPRESS_PATH': '/tmp/uav_offline_sim/test_compress.pcd',
 }
+
+# 起飞前自检（ENABLE_PREFLIGHT_CHECK）不在此覆盖，跟随 config.py 生效：
+# SITL 同样发布 battery_status / vehicle_status / failsafe_flags 等自检所需话题，
+# 仿真里能复现真机的完整起飞自检序列。需要临时跳过时用环境变量关闭：
+#     SIM_ENABLE_PREFLIGHT_CHECK=false ros2 launch task_dispatcher ...
+if os.environ.get('SIM_ENABLE_PREFLIGHT_CHECK') is not None:
+    SIM_CONFIG_OVERRIDES['ENABLE_PREFLIGHT_CHECK'] = (
+        os.environ['SIM_ENABLE_PREFLIGHT_CHECK'].strip().lower() in ('1', 'true', 'yes', 'on'))
 
 # 离线仿真没有文件服务器；保留 URL 形态仅为让在线构造器不报错，实际不会被访问
 SIM_SERVER_URL = 'http://127.0.0.1:9'
@@ -259,6 +266,7 @@ class SimSubprocess:
 # 在线代码以绝对名使用的飞控话题：仿真里需要加载具命名空间前缀
 ABSOLUTE_FMU_TOPICS = [
     '/fmu/in/vehicle_command',
+    '/fmu/in/offboard_control_mode',
     '/fmu/out/vehicle_status',
     '/fmu/out/battery_status',
     '/fmu/out/failsafe_flags',

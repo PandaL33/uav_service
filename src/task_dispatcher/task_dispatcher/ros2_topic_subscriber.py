@@ -156,6 +156,7 @@ class Ros2TopicSubscriber:
         self.vehicle_status: Optional[VehicleStatus] = None
         self.battery_status: Optional[BatteryStatus] = None
         self.failsafe_flags: Optional[FailsafeFlags] = None
+        self.vehicle_local_position: Optional[VehicleLocalPosition] = None
         
         if ROBOT_TYPE == "default":
             # 创建订阅者
@@ -369,6 +370,12 @@ class Ros2TopicSubscriber:
                 return None
             return copy.deepcopy(self.failsafe_flags)
     
+    def get_vehicle_local_position(self):
+        with self._lock:
+            if self.vehicle_local_position is None:
+                return None
+            return copy.deepcopy(self.vehicle_local_position)
+    
     def _cb_device_global_pos(self, msg: VehicleGlobalPosition):
         try:
             with self._lock:
@@ -392,6 +399,7 @@ class Ros2TopicSubscriber:
     def _cb_device_local_pos(self, msg: VehicleLocalPosition):
         try:
             with self._lock:
+                self.vehicle_local_position = msg
                 self._device_state["local_position"]["altitude_relative"] = round(float(-msg.z),3)
                 
                 vx = float(msg.vx)

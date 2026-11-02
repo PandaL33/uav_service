@@ -227,11 +227,12 @@ class DockControlClient:
         if not success:
             return False, f"打开舱盖失败: {msg}"
         
-        # 3. 等待舱盖完全打开
-        logger.info("步骤 3: 等待舱盖打开完成")
-        success, msg = self.wait_for_operation('cover')
+        # 3. 等待舱盖完全打开（20s 兜底：机库进度反馈缺失时不阻塞起飞流程，
+        #    否则一旦 /dock/operation_progress 断流会一直卡到 60s 并中止任务）
+        logger.info("步骤 3: 等待舱盖打开完成（最长 20s）")
+        success, msg = self.wait_for_operation('cover', timeout=20.0)
         if not success:
-            return False, f"舱盖未到位: {msg}"
+            logger.warning(f"舱盖开启进度未在 20s 内确认完成，按已开盖继续: {msg}")
             
         # 4. 展开推杆
         logger.info("步骤 4: 展开推杆")
