@@ -44,7 +44,7 @@ SEGMENT_DURATION = 300
 FORCE_FPS = None 
 
 # 是否进行起飞前设备状态自检
-ENABLE_PREFLIGHT_CHECK = False
+ENABLE_PREFLIGHT_CHECK = True
 
 # 是否进行起飞前机舱的控制自检
 ENABLE_DOCK_CONTROL = False

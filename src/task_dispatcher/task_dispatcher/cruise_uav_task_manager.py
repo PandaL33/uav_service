@@ -13,7 +13,8 @@ import rclpy
 import asyncio
 import subprocess
 from std_msgs.msg import String, Empty
-from px4_msgs.msg import VehicleCommand, VehicleStatus
+from px4_msgs.msg import VehicleCommand, VehicleStatus, OffboardControlMode
+from rkdrone_msgs.srv import RKDroneCmd
 from typing import Dict, List, Optional, Any, Tuple
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 import uuid
@@ -115,6 +116,18 @@ class CruiseUavTaskManager:
                              name='dock_charge_watchdog').start()
         # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
         self.map_save_client = self.node.create_client(Trigger, '/map_save')
+        # offboard 心跳监听：ego_planner.service（含 rkdrone_communication）启动后
+        # 才会持续发布 /fmu/in/offboard_control_mode，用它确认通信链路已就绪再切 OFFBOARD
+        self._offboard_mode_last_time = 0.0
+        self.offboard_mode_sub = self.node.create_subscription(
+            OffboardControlMode,
+            '/fmu/in/offboard_control_mode',
+            self._offboard_control_mode_callback,
+            10,
+        )
+        # RKDroneCmd 命令通道（飞行控制指令唯一写者是 rkdrone_communication）
+        self.rkdrone_cmd_client = None
+        self.rkdrone_cmd_service = ''
         # 自检
         self.preflight_check_node = PreFlightCheckNode(
                     node=self.node,
@@ -682,6 +695,101 @@ class CruiseUavTaskManager:
         logger.info('停止ego_planner.service服务...')
         subprocess.Popen(['sudo', 'systemctl', 'stop', 'ego_planner.service'])
         logger.info('停止ego_planner.service服务操作完成')
+
+    def _offboard_control_mode_callback(self, msg: OffboardControlMode):
+        self._offboard_mode_last_time = time.time()
+
+    def _wait_offboard_control_mode(self, timeout: float = 30.0, freshness: float = 2.0) -> bool:
+        """等待 /fmu/in/offboard_control_mode 心跳（由 ego_planner.service 内的
+        rkdrone_communication 发布）。收到一帧且距当前不超过 freshness 秒即视为链路就绪。"""
+        start_time = time.time()
+        deadline = start_time + timeout
+        last_log_time = start_time
+        logger.info(f'等待 /fmu/in/offboard_control_mode 心跳（最长 {timeout}s）...')
+        while time.time() < deadline and rclpy.ok():
+            if self._offboard_mode_last_time > 0:
+                age = time.time() - self._offboard_mode_last_time
+                if age <= freshness:
+                    logger.info(f'已检测到 /fmu/in/offboard_control_mode 心跳，距上一帧 {age:.2f}s')
+                    return True
+            if time.time() - last_log_time >= 5.0:
+                last_log_time = time.time()
+                logger.info('仍在等待 /fmu/in/offboard_control_mode 心跳...')
+            time.sleep(0.1)
+        logger.error(f'等待 /fmu/in/offboard_control_mode 心跳超时（{timeout}s）')
+        return False
+
+    def _get_rkdrone_cmd_client(self):
+        """惰性解析并缓存 RKDroneCmd 服务客户端（飞行控制指令的唯一写者是 rkdrone_communication）。
+
+        真机无命名空间时为 /rkdrone/cmd；多机仿真下 comms 在 /rkdrone/<ns>/cmd，
+        从 ROS 图里挑选唯一的 RKDroneCmd 服务。
+        """
+        if self.rkdrone_cmd_client is not None:
+            return self.rkdrone_cmd_client
+        candidates = [name for name, types in self.node.get_service_names_and_types()
+                      if 'rkdrone_msgs/srv/RKDroneCmd' in types]
+        if '/rkdrone/cmd' in candidates:
+            service_name = '/rkdrone/cmd'
+        elif len(candidates) == 1:
+            service_name = candidates[0]
+        else:
+            logger.error(f'无法唯一确定 RKDroneCmd 服务: {candidates}')
+            return None
+        self.rkdrone_cmd_service = service_name
+        self.rkdrone_cmd_client = self.node.create_client(RKDroneCmd, service_name)
+        logger.info(f'RKDroneCmd 服务: {service_name}')
+        return self.rkdrone_cmd_client
+
+    def _engage_offboard_mode(self, timeout: float = 10.0) -> Tuple[bool, str]:
+        """经 /rkdrone/cmd 请求切 OFFBOARD，并确认 PX4 的 nav_state 真的进入 OFFBOARD。
+
+        不直写 /fmu/in/vehicle_command：飞行控制指令唯一写者是 rkdrone_communication。
+        """
+        client = self._get_rkdrone_cmd_client(wait_timeout=5.0)
+        if client is None:
+            return False, '未找到 RKDroneCmd 服务'
+        deadline = time.time() + timeout
+        last_request_time = 0.0
+        while time.time() < deadline and rclpy.ok():
+            status = self.ros_topic_subscriber.get_vehicle_status()
+            if status is not None and status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+                logger.info('PX4 已进入 OFFBOARD 模式')
+                return True, '已切换 OFFBOARD'
+            # 每 2s 重发一次请求，防止单帧 vehicle_command 丢失
+            if time.time() - last_request_time >= 2.0:
+                last_request_time = time.time()
+                if not client.wait_for_service(timeout_sec=3.0):
+                    logger.warning('RKDroneCmd 服务不可用，重试...')
+                    continue
+                request = RKDroneCmd.Request()
+                request.command = 'OFFBOARD'
+                future = client.call_async(request)
+                call_start = time.time()
+                while not future.done() and time.time() - call_start < 3.0:
+                    time.sleep(0.05)
+                if not future.done():
+                    logger.warning('OFFBOARD 服务调用超时，重试...')
+                else:
+                    try:
+                        if not future.result().success:
+                            logger.warning('rkdrone_communication 拒绝 OFFBOARD 命令')
+                    except Exception as e:
+                        logger.warning(f'OFFBOARD 服务调用异常: {e}')
+            time.sleep(0.2)
+        return False, f'PX4 nav_state 未在 {timeout}s 内进入 OFFBOARD'
+
+    def _abort_before_takeoff(self, task_id: str, msg: str):
+        """起飞前失败统一收尾：停导航服务 → 机库回滚 → 上报并复位。
+
+        这些失败都发生在解锁之前（心跳未就绪 / OFFBOARD 切换失败 / 自检不过），
+        停掉 ego_planner 不会让 PX4 在飞行中丢失 offboard 心跳。
+        """
+        logger.warning(f'[起飞前收尾] task={task_id}: {msg}')
+        self._stop_ego_planner_service()
+        self._dock_rollback_after_takeoff_failure(task_id)
+        self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
+        self.reset_status()
 
     def _wait_landed(self, timeout: float) -> bool:
         """等 PX4 落定上锁（arming_state=DISARMED）。上锁由 comms 的落地检测流程负责，
@@ -1271,21 +1379,10 @@ class CruiseUavTaskManager:
                         self.reset_status()
                         return
 
-                # 起飞前状态检测
-                if ENABLE_PREFLIGHT_CHECK:
-                    # if self.node.get_uav_fault_inspection() == False:
-                    #     return
-                    
-                    check_code, msg = self.preflight_check_node._start_check()
-                    if check_code == 1:
-                        logger.warning(msg)
-                        # 机库此时已开盖，自检不通过必须回滚，否则机舱一直敞着
-                        self._dock_rollback_after_takeoff_failure(task_id)
-                        self._report_task_status(task_id, TaskStatus.ABORTED.value, msg)
-                        self.reset_status()
-                        return
-                    
-                # 检查地图是否存在，如果不存在则进行更新
+                # 开盖后的起飞前准备：先起导航服务，再确认 offboard 心跳，最后切 OFFBOARD。
+                # 顺序原因：ego_planner.service 内含 rkdrone_communication，只有它启动后
+                # /fmu/in/offboard_control_mode 才有信号；无该信号时 PX4 会拒绝 OFFBOARD，
+                # 未接遥控器时还会退回 LOITER，导致随后的 preflight 自检必然失败。
                 # 开盖后的起飞前准备失败（地图/规划服务）同样需要回滚机库
                 try:
                     map_file_id = body['mapFileId']
@@ -1302,8 +1399,31 @@ class CruiseUavTaskManager:
                     logger.error(f'起飞前准备失败: {str(e)}')
                     self._dock_rollback_after_takeoff_failure(task_id)
                     raise
-                
-                # 执行巡检任务    
+
+                # 等待 offboard 心跳（ego_planner / rkdrone_communication 就绪）
+                if not self._wait_offboard_control_mode():
+                    self._abort_before_takeoff(
+                        task_id, '未检测到 /fmu/in/offboard_control_mode 心跳，ego_planner 通信节点未就绪')
+                    return
+
+                # 切换到 OFFBOARD：走 /rkdrone/cmd 命令通道，飞行控制指令唯一写者是 rkdrone_communication
+                offboard_ok, offboard_msg = self._engage_offboard_mode()
+                if not offboard_ok:
+                    self._abort_before_takeoff(task_id, f'切换 OFFBOARD 失败: {offboard_msg}')
+                    return
+
+                # 起飞前状态检测（此时模式已是 OFFBOARD，自检反映真实起飞条件）
+                if ENABLE_PREFLIGHT_CHECK:
+                    check_code, report = self.preflight_check_node._start_check()
+                    if check_code == 1:
+                        # report 是结构化列表，取中文详情串便于日志与平台上报
+                        detail = self.preflight_check_node.get_detailed_report() or str(report)
+                        logger.warning(f'起飞前检查未通过：{detail}')
+                        # 机库此时已开盖，自检不通过必须回滚，否则机舱一直敞着
+                        self._abort_before_takeoff(task_id, detail)
+                        return
+
+                # 执行巡检任务
                 self._processing_cruise_task(task_id, body)
                 
                 

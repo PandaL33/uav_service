@@ -41,7 +41,9 @@
     - 在线代码的 `sudo systemctl start/stop ego_planner.service` 已被 sim_support 的
       SimSubprocess 旁路（online_sim_bootstrap 打桩；sim_paths:=false 时原样执行，
       仿真机无此 unit 会拖慢并中断任务线程，勿关）。
-    - config.py 业务开关（ROBOT_TYPE=uav、PREFLIGHT/DOCK/MANUAL 关闭）与本场景一致；
+    - config.py 业务开关（ROBOT_TYPE=uav、DOCK/MANUAL 关闭）与本场景一致；
+      ENABLE_PREFLIGHT_CHECK 跟随 config.py（SITL 也有 battery_status 等话题，
+      仿真能复现完整起飞自检序列），需跳过时 `SIM_ENABLE_PREFLIGHT_CHECK=false ros2 launch ...`；
       sim_paths:=true（默认）时仅覆盖“机载路径/相机/云台”这几个边界项到 /tmp
       （与离线套件同一注入套路，见 offline_sim/online_sim_bootstrap.py），
       其余业务代码与真机同源；给 false 则完全原样运行（需本机建好 /home/cat 目录）。
