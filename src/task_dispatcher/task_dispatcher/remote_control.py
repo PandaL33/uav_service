@@ -319,7 +319,7 @@ class RemoteControl:
                 # self._call_uav_gpio(act_name, argv, 1)
             elif act_name in ('hover', 'rtl', 'rtl_route', 'continue'):
                 # 平台即时飞控指令：悬停(暂停)/直线返航/沿线返航/续航。
-                # 这些底层 XTD2Cmd 服务不支持，统一路由到 cruise 管理器的
+                # 这些底层 RKDroneCmd 服务不支持，统一路由到 cruise 管理器的
                 # process_uav_command 执行真正的飞控语义。
                 self._call_uav_flight_command(act_name, argv,
                                               getattr(self, '_active_message', None))
@@ -357,7 +357,7 @@ class RemoteControl:
     def _call_uav_flight_command(self, act_name, argv, message_data=None):
         """处理平台即时飞控指令（悬停/直线返航/沿线返航/续航）。
 
-        底层 XTD2Cmd 服务不支持 RTL_ROUTE/CONTINUE，统一转交给
+        底层 RKDroneCmd 服务不支持 RTL_ROUTE/CONTINUE，统一转交给
         cruise_uav_task_manager.process_uav_command 执行真正的飞控语义。
         """
         act_name_to_kind = {

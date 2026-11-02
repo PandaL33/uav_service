@@ -293,7 +293,7 @@ def px4_odom_topic(namespace: str) -> str:
 
 def cmd_service_name(namespace: str) -> str:
     base_ns = base_namespace(namespace)
-    return f'/xtdrone2/{base_ns}/cmd' if base_ns else '/xtdrone2/cmd'
+    return f'/rkdrone/{base_ns}/cmd' if base_ns else '/rkdrone/cmd'
 
 
 def fmu_remap_tuples(namespace: str) -> List[Tuple[str, str]]:

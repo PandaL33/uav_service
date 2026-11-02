@@ -126,7 +126,7 @@ cat <<EOF
   source ${ROS_SETUP}
   source ${USE_WS_ROOT}
   # 1) 起仿真（另开终端）
-  ros2 launch xtd2_launch ros2_single_vehicle_demo_launch.py
+  ros2 launch rkdrone_launch ros2_single_vehicle_demo_launch.py
   # 2) 起离线航线（只起调度侧，就绪后立刻执行航线；默认读 launch 目录旁的 waypoints_3_3.json）
   ros2 launch ${REPO_ROOT}/uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
   # 换航线：route_file:=<路径或裸文件名>；只看报文不真飞：追加 dry_run:=true

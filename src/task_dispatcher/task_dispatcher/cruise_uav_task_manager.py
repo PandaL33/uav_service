@@ -171,7 +171,7 @@ class CruiseUavTaskManager:
 
         # ===== 平台即时飞控指令（悬停(暂停) / 续航 / 降落（即迫降）/ 直线返航 / 沿线返航）=====
         # ego_planner 的控制入口：traj_server 收到 /stop_planning 会停止发送轨迹并清掉
-        # 目标点与 SZD 状态（xtd2_traj_server.cpp stopPlanningCallback）。没新目标点时它
+        # 目标点与 SZD 状态（rkdrone_traj_server.cpp stopPlanningCallback）。没新目标点时它
         # 改为持续发送“当前位置”设定点，即飞机原地悬停 —— 这是降落前必须先把控制权
         # 交回飞控的原因，否则 planner 的 offboard 设定点会与 PX4 原生 LAND/RTL 抢控制。
         self.stop_planning_pub = self.node.create_publisher(Empty, "/stop_planning", 10)

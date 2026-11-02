@@ -4,7 +4,7 @@
 
 前置条件
     1. 先把仿真跑起来（Gazebo 世界 + PX4 SITL + 载具 + tf_publisher + ego_planner + CP）：
-         ros2 launch xtd2_launch ros2_single_vehicle_demo_launch.py
+         ros2 launch rkdrone_launch ros2_single_vehicle_demo_launch.py
     2. 装好离线依赖（只装依赖，不改在线代码）：
          bash uav_service/scripts/setup_offline_sim_env.sh
     3. 起本文件，启动后会等规划器就绪 -> 立刻按航点执行航线（默认写死读本目录旁的
@@ -17,7 +17,7 @@
        测试用的完整 pub 指令清单在启动时生成到 task_dispatcher/offline_sim/commands.txt
 
 本启动文件包含 2 个进程 + 1 个就绪门（航线进程退出后会话自动结束）
-    - sim_uav_command_bridge   : /uav_command(LAND/RTL/...) -> multirotor_communication 的 XTD2Cmd 服务
+    - sim_uav_command_bridge   : /uav_command(LAND/RTL/...) -> multirotor_communication 的 RKDroneCmd 服务
                                  （用于验证“连续航点不可达 -> 返航受阻 -> 迫降”分支）
     - wait_sim_ready           : 等 PX4 SITL 里程计已发布 + ego_planner 已订阅目标点话题
     - offline_cruise_sim_node  : 读航点 JSON（页面只给坐标，方向按 yaw_mode 自动补），走与在线同一条入口
@@ -202,7 +202,7 @@ def generate_launch_description():
     default_route = _default_route()
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='/x500_depth_0/',
-                              description='仿真载具命名空间（决定 /fmu 话题前缀与 XTD2Cmd 服务名）'),
+                              description='仿真载具命名空间（决定 /fmu 话题前缀与 RKDroneCmd 服务名）'),
         DeclareLaunchArgument('route_file', default_value=default_route,
                               description='航点配置 JSON；默认写死为本 launch 目录旁的 waypoints_3_3.json，'
                                           '也可传绝对路径或裸文件名(在 offline_sim/routes 与仓库根里找)'),

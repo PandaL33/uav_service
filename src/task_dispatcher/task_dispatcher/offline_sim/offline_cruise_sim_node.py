@@ -96,7 +96,7 @@ def compute_route_yaws(points: List[Dict[str, float]], mode: str = 'smooth',
                        fixed_rad: float = 0.0) -> List[float]:
     """按航线几何推导每个航点的机头朝向（弧度，[-pi, pi]）。
 
-    为什么需要：在线 pos 必须含 d，且 xtd2_traj_server 会在“距目标 2m 内/轨迹结束时”
+    为什么需要：在线 pos 必须含 d，且 rkdrone_traj_server 会在“距目标 2m 内/轨迹结束时”
     把机头转到目标四元数的 yaw。若统一填 0，每个航点都会把机头拧回 +X。
 
       smooth   : Catmull-Rom 中心切线 (P[k+1]-P[k-1])，端点重复自身——朝向沿曲线平滑过渡

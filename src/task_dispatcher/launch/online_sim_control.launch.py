@@ -10,7 +10,7 @@
 
 前置条件
     1. 仿真已按 demo 跑起来（Gazebo + PX4 SITL + ego_planner + tf_publisher）：
-         ros2 launch xtd2_launch ros2_single_vehicle_demo_launch.py
+         ros2 launch rkdrone_launch ros2_single_vehicle_demo_launch.py
     2. task_dispatcher 包已 colcon 构建安装（在线节点按 package 方式启动）。
     3. 起本文件（桥脚本与 sim_support 已随包安装到 share/task_dispatcher/offline_sim；
        改动 setup.py 安装清单后需重新构建一次）：
@@ -23,7 +23,7 @@
     - sim_pcl_pose_bridge   : <namespace>/odometry 真值 -> /pcl_pose
                               （在线链路的位置来源是激光定位，仿真里没有，用桥补齐；
                                 换算与 QoS 和离线直喂共用 sim_support，同一份逻辑）
-    - sim_uav_command_bridge: /uav_command(LAND 等) -> multirotor_communication 的 XTD2Cmd
+    - sim_uav_command_bridge: /uav_command(LAND 等) -> multirotor_communication 的 RKDroneCmd
                               （验证“返航受阻 -> 迫降”分支；不需要可关）
     - mediamtx              : 本机 RTSP 服务器（8554），模拟真机云台相机的出流服务
                               （enable_rtsp_camera:=false 或找不到二进制时跳过）
@@ -130,7 +130,7 @@ def launch_setup(context, *args, **kwargs):
         shell=False,
     )
 
-    # 2) 命令桥：_emergency_land 等发出的 /uav_command 在仿真里落到 XTD2Cmd 服务
+    # 2) 命令桥：_emergency_land 等发出的 /uav_command 在仿真里落到 RKDroneCmd 服务
     command_bridge = ExecuteProcess(
         cmd=[python_bin, os.path.join(OFFLINE_DIR, 'sim_uav_command_bridge.py'),
              '--command-topic', '/uav_command',
@@ -262,7 +262,7 @@ def launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='/x500_depth_0/',
-                              description='仿真载具命名空间（决定 /fmu 话题前缀与 XTD2Cmd 服务名）'),
+                              description='仿真载具命名空间（决定 /fmu 话题前缀与 RKDroneCmd 服务名）'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='是否跟随 Gazebo 仿真时钟（仿真必须 true）'),
         DeclareLaunchArgument('truth_odom_topic', default_value='',
