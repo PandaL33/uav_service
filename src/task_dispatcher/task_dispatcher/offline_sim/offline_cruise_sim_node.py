@@ -24,7 +24,7 @@
     6. 命名空间: /fmu/in|out/... 为绝对名，仿真里载具带 /x500_depth_0/ 前缀，
        由启动文件用 remap 处理（不改代码）
 
-用法（通常由 uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py 调用）：
+用法（通常由 rkdrone_third_party_pkgs/uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py 调用）：
     python3 offline_cruise_sim_node.py --route routes/sim_route_demo.json --use-sim-time true
 """
 

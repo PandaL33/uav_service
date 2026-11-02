@@ -4,7 +4,7 @@ launch/online_sim_control.launch.py 共用；凭证不入库）。
 
 查找顺序（先命中先返回）：
     1. 环境变量 UAV_ENDPOINT_CONFIG 指向的文件
-    2. 仓内 uav_service/endpoint.local.json（由 launch 目录上溯三级，已在 .gitignore）
+    2. 仓内 rkdrone_third_party_pkgs/uav_service/endpoint.local.json（由 launch 目录上溯三级，已在 .gitignore）
     3. install 空间 share/task_dispatcher/endpoint.local.json（launch 目录上一级）
     4. ~/.uav_service/endpoint.json
 

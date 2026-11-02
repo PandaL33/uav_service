@@ -1053,7 +1053,7 @@ Environment="PYTHONPATH=/home/cat/uav_service/src/task_dispatcher/task_dispatche
 
 ```bash
 # 在本仓所在工作区（如 <ws>/src/ 下）执行
-colcon build --paths uav_service/src/robot_interface uav_service/src/multi_algo_interfaces
+colcon build --paths rkdrone_third_party_pkgs/uav_service/src/robot_interface rkdrone_third_party_pkgs/uav_service/src/multi_algo_interfaces
 ```
 
 若工作区 `install/` 已被清空重建而未包含这两个包，在线节点会在 import 阶段直接失败。
@@ -1075,7 +1075,7 @@ colcon build --paths uav_service/src/robot_interface uav_service/src/multi_algo_
   `_execute_task_thread` → `_processing_cruise_task` → `perform_action_walk_to_pos_3d`。
 - `setup.py` 的 `data_files` 只收 `task_dispatcher/*.py`，不含子目录，所以 colcon 安装不会带上
   `offline_sim/`；离线的跑法是按源码路径执行（`launch/offline_route_sim.launch.py` 即如此）。
-- 本仓在 XTDrone2_ego_planner 里以 **git submodule** 形式挂在 `uav_service/`，
+- 本仓在 XTDrone2_ego_planner 里以 **git submodule** 形式挂在 `rkdrone_third_party_pkgs/uav_service/`，
   更新方式：`git submodule update --remote uav_service`。
 - 依赖准备：`bash scripts/setup_offline_sim_env.sh`（只装 paho/gpiod/cv2 等本机缺失项，
   不构建接口包）。

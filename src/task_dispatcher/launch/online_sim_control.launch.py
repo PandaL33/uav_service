@@ -313,6 +313,6 @@ def generate_launch_description():
                                           '直跑源码（x86 仿真机系统 python 缺 paho/cv2 等依赖），'
                                           '否则用 colcon 安装入口（与真机一致）；也可显式给解释器路径'),
         DeclareLaunchArgument('python_bin', default_value='',
-                              description='运行桥节点的 python，留空自动优先 uav_service/.venv'),
+                              description='运行桥节点的 python，留空自动优先 rkdrone_third_party_pkgs/uav_service/.venv'),
         OpaqueFunction(function=launch_setup),
     ])

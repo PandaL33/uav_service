@@ -6,7 +6,7 @@
     1. 先把仿真跑起来（Gazebo 世界 + PX4 SITL + 载具 + tf_publisher + ego_planner + CP）：
          ros2 launch rkdrone_launch ros2_single_vehicle_demo_launch.py
     2. 装好离线依赖（只装依赖，不改在线代码）：
-         bash uav_service/scripts/setup_offline_sim_env.sh
+         bash rkdrone_third_party_pkgs/uav_service/scripts/setup_offline_sim_env.sh
     3. 起本文件，启动后会等规划器就绪 -> 立刻按航点执行航线（默认写死读本目录旁的
        waypoints_3_3.json，无需再传 route_file）：
          ros2 launch task_dispatcher offline_route_sim.launch.py

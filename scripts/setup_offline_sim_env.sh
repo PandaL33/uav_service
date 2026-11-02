@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 仿真离线航线（uav_service/src/task_dispatcher/task_dispatcher/offline_sim）依赖准备脚本
+# 仿真离线航线（rkdrone_third_party_pkgs/uav_service/src/task_dispatcher/task_dispatcher/offline_sim）依赖准备脚本
 # —— 只负责装本机缺的 Python/系统依赖，不改动任何在线代码。
 #
 # 背景（本机实测缺口）：
@@ -11,9 +11,9 @@
 #      构建一次后才能被在线/离线代码 import；本脚本不负责构建它们，只装本机缺失的 Python/系统依赖。
 #
 # 用法：
-#   bash uav_service/scripts/setup_offline_sim_env.sh            # 装进当前 Python 环境（venv/conda/system 均可）
-#   bash uav_service/scripts/setup_offline_sim_env.sh --skip-apt # 跳过 sudo apt（gpiod 自行处理）
-#   bash uav_service/scripts/setup_offline_sim_env.sh --system   # 强制 pip install --user
+#   bash rkdrone_third_party_pkgs/uav_service/scripts/setup_offline_sim_env.sh            # 装进当前 Python 环境（venv/conda/system 均可）
+#   bash rkdrone_third_party_pkgs/uav_service/scripts/setup_offline_sim_env.sh --skip-apt # 跳过 sudo apt（gpiod 自行处理）
+#   bash rkdrone_third_party_pkgs/uav_service/scripts/setup_offline_sim_env.sh --system   # 强制 pip install --user
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
