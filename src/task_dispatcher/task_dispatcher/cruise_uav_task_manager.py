@@ -719,7 +719,7 @@ class CruiseUavTaskManager:
         logger.error(f'等待 /fmu/in/offboard_control_mode 心跳超时（{timeout}s）')
         return False
 
-    def _get_rkdrone_cmd_client(self):
+    def _get_rkdrone_cmd_client(self, wait_timeout: float = 5.0):
         """惰性解析并缓存 RKDroneCmd 服务客户端（飞行控制指令的唯一写者是 rkdrone_communication）。
 
         真机无命名空间时为 /rkdrone/cmd；多机仿真下 comms 在 /rkdrone/<ns>/cmd，
@@ -738,6 +738,8 @@ class CruiseUavTaskManager:
             return None
         self.rkdrone_cmd_service = service_name
         self.rkdrone_cmd_client = self.node.create_client(RKDroneCmd, service_name)
+        if wait_timeout > 0 and not self.rkdrone_cmd_client.wait_for_service(timeout_sec=wait_timeout):
+            logger.warning(f'RKDroneCmd 服务 {service_name} 在 {wait_timeout}s 内未就绪')
         logger.info(f'RKDroneCmd 服务: {service_name}')
         return self.rkdrone_cmd_client
 
