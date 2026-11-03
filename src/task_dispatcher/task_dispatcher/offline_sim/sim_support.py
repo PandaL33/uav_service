@@ -41,7 +41,7 @@ MOD_ROOT = os.path.dirname(THIS_DIR)
 # 包的父目录（内含 task_dispatcher 包本体与 launch/）
 PKG_ROOT = os.path.dirname(MOD_ROOT)
 # <repo> = .../XTDrone2_ego_planner
-REPO_ROOT = os.path.abspath(os.path.join(PKG_ROOT, '..', '..', '..'))
+REPO_ROOT = os.path.abspath(os.path.join(PKG_ROOT, '..', '..', '..', '..'))
 
 logger = logging.getLogger('sim_support')
 

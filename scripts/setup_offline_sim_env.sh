@@ -17,7 +17,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # <repo> = .../XTDrone2_ego_planner
+PKGS_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"           # <pkgs> = .../rkdrone_third_party_pkgs
+REPO_ROOT="$(cd "${PKGS_ROOT}/.." && pwd)"               # <repo> = .../XTDrone2_ego_planner
 WS_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"                 # <ws>   = .../xtd2_ws
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="${WS_ROOT}/install/setup.bash"
@@ -92,13 +93,13 @@ if [ -f "${WS_SETUP}" ]; then
 else
   warn "未找到 ${WS_SETUP}，工作区接口包可能不在 PYTHONPATH 里"
 fi
-REPO_ROOT_ENV="${REPO_ROOT}" "${PY_BIN}" - <<'PYEOF' || die "导入自检失败，请按上面提示补齐依赖后重跑本脚本"
+PKGS_ROOT_ENV="${PKGS_ROOT}" "${PY_BIN}" - <<'PYEOF' || die "导入自检失败，请按上面提示补齐依赖后重跑本脚本"
 import importlib
 import os
 import sys
 
 # 让 task_dispatcher 包，以及它内部混用的顶层导入（如 `from uav_command_sender import ...`）都能解析
-mod_root = os.path.join(os.environ['REPO_ROOT_ENV'], 'uav_service', 'src',
+mod_root = os.path.join(os.environ['PKGS_ROOT_ENV'], 'uav_service', 'src',
                         'task_dispatcher', 'task_dispatcher')
 for p in (mod_root, os.path.dirname(mod_root)):
     if p not in sys.path:
@@ -128,7 +129,7 @@ cat <<EOF
   # 1) 起仿真（另开终端）
   ros2 launch rkdrone_launch ros2_single_vehicle_demo_launch.py
   # 2) 起离线航线（只起调度侧，就绪后立刻执行航线；默认读 launch 目录旁的 waypoints_3_3.json）
-  ros2 launch ${REPO_ROOT}/uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
+  ros2 launch ${PKGS_ROOT}/uav_service/src/task_dispatcher/launch/offline_route_sim.launch.py
   # 换航线：route_file:=<路径或裸文件名>；只看报文不真飞：追加 dry_run:=true
   # 上报落盘：/tmp/uav_offline_sim/action_report.jsonl
 EOF
