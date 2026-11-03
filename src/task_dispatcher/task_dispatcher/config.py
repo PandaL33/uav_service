@@ -43,6 +43,9 @@ SEGMENT_DURATION = 300
 # 设置为 None 则自动检测摄像头 FPS
 FORCE_FPS = None 
 
+# 实时视频推流帧率上限（预览推流按此抽帧，降低机载编码与上行带宽占用）
+PREVIEW_FPS = 5
+
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True
 

@@ -9,7 +9,7 @@ from threading import Thread, Lock
 import signal
 import os
 import platform
-from config import CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO
+from config import CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS
 import cv2
 
 # 配置日志
@@ -176,6 +176,7 @@ class VideoPreviewManager:
                     '-timeout', '5000000',    # 设置超时时间，单位微秒
                     '-i', rtsp_url,            # 输入RTSP地址
                     '-c:v', 'copy',            # 视频使用copy模式，不重新编码
+                    '-r', str(PREVIEW_FPS),    # 输出限帧（copy 模式下按时间戳丢帧）
                     '-c:a', 'aac',             # 音频使用AAC编码
                     '-f', 'flv',               # 输出格式为FLV
                     '-y'                       # 覆盖已存在的文件
@@ -189,8 +190,9 @@ class VideoPreviewManager:
                     '-c:v', 'h264_rkmpp',            # 视频使用copy模式，不重新编码
                     '-pix_fmt', 'yuv420p',
                     '-profile:v', 'baseline',
-                    '-g', '50',
-                    '-keyint_min', '50',
+                    '-r', str(PREVIEW_FPS),    # 输出限帧
+                    '-g', str(PREVIEW_FPS * 2),        # 关键帧间隔约 2s（跟随限帧后的帧率）
+                    '-keyint_min', str(PREVIEW_FPS * 2),
                     '-an',
                     '-f', 'flv',               # 输出格式为FLV
                     '-y'                       # 覆盖已存在的文件
