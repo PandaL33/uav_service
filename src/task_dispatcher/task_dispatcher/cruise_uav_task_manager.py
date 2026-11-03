@@ -1251,7 +1251,7 @@ class CruiseUavTaskManager:
             
             # 巡检任务完成,停止录像
             # self.rtst_record_manager.stop_recording()
-            # 处理点云数据（开始上传时已并行触发「闭合推杆 → 打开充电」，此处不再等待上传完成）
+            # 处理点云数据（保存原始点云后已并行触发「闭合推杆 → 打开充电」，此处不再等待降采样/上传完成）
             file_id = self.process_point_cloud_data(task_data.get('savePointCloud', False))
             # 未触发点云上传时（如 savePointCloud=False 或点云保存失败），补触发一次闭合推杆/充电
             # self._start_dock_close_charge()
@@ -1415,7 +1415,7 @@ class CruiseUavTaskManager:
 
     def _start_dock_close_charge(self):
         """
-        异步执行降落后的「闭合推杆 → 打开充电」，与点云上传并行，不阻塞上传;
+        异步执行降落后的「闭合推杆 → 打开充电」，与后续降采样/上传并行，不阻塞主流程;
         每个任务只触发一次。
         """
         if not ENABLE_DOCK_CONTROL:
@@ -1755,6 +1755,11 @@ class CruiseUavTaskManager:
             # 点云已落盘，导航链路不再需要，立即关闭 ego_planner，不必等后续持久化/上传完成
             self._stop_ego_planner_service()
             
+            # 原始点云已落盘，立即异步闭合推杆并开始充电（与降采样/上传并行）；
+            # 降采样耗时较长，不能让它推迟充电
+            self._post_landing_phase = True
+            self._start_dock_close_charge()
+            
             # 点云降采样
             pcd = o3d.io.read_point_cloud(pcd_file_path)
             origin_points = len(pcd.points)
@@ -1777,9 +1782,7 @@ class CruiseUavTaskManager:
             else:
                 logger.error(f"点云文件持久化失败")
             
-            # 7. 开始上传点云的同时闭合推杆，推杆闭合后发送一次充电（与上传并行，不阻塞上传）
-            self._post_landing_phase = True
-            self._start_dock_close_charge()
+            # 7. 上传点云文件（推杆闭合/充电已在保存原始点云后异步触发，无需等待）
             # 上传点云文件到文件服务器（带重试机制）
             file_id = self.upload_point_cloud_with_retry(pcd_file_path)
             if file_id:
