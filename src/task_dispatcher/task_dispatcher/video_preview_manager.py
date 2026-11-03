@@ -368,12 +368,14 @@ class VideoPreviewManager:
 
         if not params or stop_event is None or stop_event.is_set():
             return
-        if attempt > PREVIEW_RETRY_MAX:
+        # 上限为 0 表示不限次数：外网中断期间持续重试，直到收到停止命令
+        if PREVIEW_RETRY_MAX > 0 and attempt > PREVIEW_RETRY_MAX:
             logger.error(f'视频流连续 {PREVIEW_RETRY_MAX} 次重连失败，放弃重连: cameraId={camera_id}')
             return
 
         delay = min(PREVIEW_RETRY_DELAY * (2 ** (attempt - 1)), 30)
-        logger.warning(f'视频流断开，{delay}s 后第 {attempt}/{PREVIEW_RETRY_MAX} 次重连: cameraId={camera_id}')
+        limit = f'/{PREVIEW_RETRY_MAX}' if PREVIEW_RETRY_MAX > 0 else ''
+        logger.warning(f'视频流断开，{delay}s 后第 {attempt}{limit} 次重连: cameraId={camera_id}')
         # 等待期间可能收到停止请求，或已下发新的播放命令（停止事件被替换）
         cancelled = stop_event.wait(delay) or self._stop_events.get(camera_id) is not stop_event
         if cancelled:
