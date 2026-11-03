@@ -201,6 +201,9 @@ class TaskDispatcherNode(Node):
         # 启动心跳定时器
         self.create_timer(1.0, self.check_mqtt_connection)
         self.create_timer(60, self.check_ros_service_availability)
+        # 失效降级互通：1Hz 执行层心跳 → safety 的 TASK_LAYER_ALIVE（§16.3-C）
+        self.mission_event_pub = self.create_publisher(String, '/mission_event', 10)
+        self.create_timer(1.0, self.publish_layer_heartbeat)
 
         # 每分钟一轮的 MQTT 活动统计（降噪：明细日志走 DEBUG，这里做汇总）
         self._mqtt_stats = {'msgs': 0, 'acks': 0, 'conn_ok': 0, 'disconn': 0}
@@ -576,6 +579,20 @@ class TaskDispatcherNode(Node):
         except Exception as e:
             logger.error(f'发送ACK响应失败: {str(e)}')
     
+    def publish_layer_heartbeat(self):
+        """1Hz 执行层心跳（/mission_event，source=executor）。
+
+        safety 侧 2.5s 未收到即判 TASK_LAYER_ALIVE=0；复用任务事件通道，不新增话题。
+        """
+        payload = {
+            'event': 'HEARTBEAT',
+            'source': 'executor',
+            'flight_epoch': 'NA',
+            'goal_seq': 'NA',
+        }
+        self.mission_event_pub.publish(String(
+            data=json.dumps(payload, ensure_ascii=False, separators=(',', ':'))))
+
     def check_mqtt_connection(self):
         """
         检查MQTT连接状态，确保连接正常
