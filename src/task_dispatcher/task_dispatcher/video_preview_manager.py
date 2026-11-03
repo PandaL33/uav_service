@@ -334,16 +334,18 @@ class VideoPreviewManager:
                     self._restart_counts[camera_id] = 0
             
             # 检查返回码
-            if process.returncode != 0:
-                if expected_stop:
-                    # 由 _stop_stream 主动终止（如切换推流地址），不是故障
-                    logger.info(f'视频流已按请求停止: cameraId={camera_id}, returncode={process.returncode}')
-                else:
-                    logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
-                    self._log_ffmpeg_tail(camera_id, log_path)
-                    self._schedule_restart(camera_id)
+            if expected_stop:
+                # 由 _stop_stream 主动终止（如切换推流地址），不是故障
+                logger.info(f'视频流已按请求停止: cameraId={camera_id}, returncode={process.returncode}')
+            elif process.returncode != 0:
+                logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
+                self._log_ffmpeg_tail(camera_id, log_path)
+                self._schedule_restart(camera_id)
             else:
-                logger.info(f'视频流进程正常退出: cameraId={camera_id}')
+                # 预览流不应自行结束（如相机断流导致输入 EOF 时 ffmpeg 会正常退出），同样按断流处理
+                logger.warning(f'视频流意外结束(returncode=0，输入源可能已断流): cameraId={camera_id}')
+                self._log_ffmpeg_tail(camera_id, log_path)
+                self._schedule_restart(camera_id)
                 
         except Exception as e:
             logger.error(f'监控视频流进程时出错: {str(e)}')
