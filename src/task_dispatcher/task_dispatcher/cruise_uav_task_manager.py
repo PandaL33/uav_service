@@ -699,7 +699,7 @@ class CruiseUavTaskManager:
     def _offboard_control_mode_callback(self, msg: OffboardControlMode):
         self._offboard_mode_last_time = time.time()
 
-    def _wait_offboard_control_mode(self, timeout: float = 30.0, freshness: float = 2.0) -> bool:
+    def _wait_offboard_control_mode(self, timeout: float = 120.0, freshness: float = 2.0) -> bool:
         """等待 /fmu/in/offboard_control_mode 心跳（由 ego_planner.service 内的
         rkdrone_communication 发布）。收到一帧且距当前不超过 freshness 秒即视为链路就绪。"""
         start_time = time.time()
