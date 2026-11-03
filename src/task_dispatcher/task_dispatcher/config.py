@@ -46,6 +46,11 @@ FORCE_FPS = None
 # 实时视频推流帧率上限（预览推流按此抽帧，降低机载编码与上行带宽占用）
 PREVIEW_FPS = 5
 
+# 实时视频推流断流后的自动重连策略
+PREVIEW_RETRY_MAX = 3        # 连续失败重连次数上限（稳定运行后计数清零）
+PREVIEW_RETRY_DELAY = 2      # 首次重连等待秒数，之后翻倍（单次上限 30s）
+PREVIEW_RETRY_RESET_SEC = 30 # 连续运行超过该时长视为稳定，失败计数清零
+
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True
 

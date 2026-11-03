@@ -5,11 +5,12 @@ import logging
 import subprocess
 import time
 import json
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import signal
 import os
 import platform
-from config import CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS
+from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
+                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC)
 import cv2
 
 # 配置日志
@@ -44,6 +45,10 @@ class VideoPreviewManager:
         self.streams_lock = Lock()
         # 记录被主动停止的摄像头，避免把正常停止的退出码当成故障
         self._expected_stop = set()
+        # 断流自动重连：推流参数、连续失败次数、每个摄像头独立的停止事件
+        self._stream_params = {}
+        self._restart_counts = {}
+        self._stop_events = {}
         
         # 摄像头RTSP地址配置
         self.camera_rtsp_addresses = {CAMERAID: CAMERA01_URL}
@@ -147,7 +152,7 @@ class VideoPreviewManager:
             logger.error(f'处理停止视频命令时出错: {str(e)}')
             self.send_ack_response(message_data, 500, f'处理错误: {str(e)}', {})
     
-    def _start_stream(self, camera_id, trans_type, push_url, username, password):
+    def _start_stream(self, camera_id, trans_type, push_url, username, password, is_restart=False):
         """
         启动视频流
         
@@ -168,7 +173,19 @@ class VideoPreviewManager:
                 return False
             
             rtsp_url = self.camera_rtsp_addresses[camera_id]
-            
+
+            # 记录推流参数供断流后自动重连复用；非重连（新播放命令）时重置计数与停止事件
+            with self.streams_lock:
+                self._stream_params[camera_id] = {
+                    'trans_type': trans_type,
+                    'push_url': push_url,
+                    'username': username,
+                    'password': password,
+                }
+                if not is_restart:
+                    self._stop_events[camera_id] = Event()
+                    self._restart_counts[camera_id] = 0
+
             cmd = []
             if CODEC == "h264":
                 # 构建ffmpeg命令，参考用户提供的C++实现
@@ -215,7 +232,8 @@ class VideoPreviewManager:
             log_path = os.path.join('/tmp', f'ffmpeg_{camera_id}.log')
             devnull = open(os.devnull, 'w')
             try:
-                log_file = open(log_path, 'w')
+                # 重连时追加写，保留上一次异常退出的上下文
+                log_file = open(log_path, 'a' if is_restart else 'w')
             except OSError as e:
                 logger.warning(f'无法创建 ffmpeg 日志 {log_path}: {e}，回退到 devnull')
                 log_path, log_file = '', devnull
@@ -261,6 +279,10 @@ class VideoPreviewManager:
         """
         try:
             with self.streams_lock:
+                # 无论进程是否在运行都置位停止事件，取消可能仍在等待的重连
+                stop_event = self._stop_events.get(camera_id)
+                if stop_event is not None:
+                    stop_event.set()
                 if camera_id not in self.running_streams:
                     return False
                 
@@ -304,11 +326,13 @@ class VideoPreviewManager:
             
             # 进程结束后，清理资源
             with self.streams_lock:
-                if camera_id in self.running_streams:
-                    del self.running_streams[camera_id]
+                info = self.running_streams.pop(camera_id, None)
                 expected_stop = camera_id in self._expected_stop
                 self._expected_stop.discard(camera_id)
-
+                # 稳定运行超过阈值则清零失败计数，避免长跑后偶发断流被旧计数拖死
+                if info and time.time() - info.get('start_time', 0) >= PREVIEW_RETRY_RESET_SEC:
+                    self._restart_counts[camera_id] = 0
+            
             # 检查返回码
             if process.returncode != 0:
                 if expected_stop:
@@ -317,6 +341,7 @@ class VideoPreviewManager:
                 else:
                     logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
                     self._log_ffmpeg_tail(camera_id, log_path)
+                    self._schedule_restart(camera_id)
             else:
                 logger.info(f'视频流进程正常退出: cameraId={camera_id}')
                 
@@ -332,6 +357,35 @@ class VideoPreviewManager:
                     log_file.close()
                 except Exception:
                     pass
+
+    def _schedule_restart(self, camera_id):
+        """断流后按指数退避重连；由停止事件取消，连续失败超过上限则放弃"""
+        with self.streams_lock:
+            params = self._stream_params.get(camera_id)
+            stop_event = self._stop_events.get(camera_id)
+            attempt = self._restart_counts.get(camera_id, 0) + 1
+            self._restart_counts[camera_id] = attempt
+
+        if not params or stop_event is None or stop_event.is_set():
+            return
+        if attempt > PREVIEW_RETRY_MAX:
+            logger.error(f'视频流连续 {PREVIEW_RETRY_MAX} 次重连失败，放弃重连: cameraId={camera_id}')
+            return
+
+        delay = min(PREVIEW_RETRY_DELAY * (2 ** (attempt - 1)), 30)
+        logger.warning(f'视频流断开，{delay}s 后第 {attempt}/{PREVIEW_RETRY_MAX} 次重连: cameraId={camera_id}')
+        # 等待期间可能收到停止请求，或已下发新的播放命令（停止事件被替换）
+        cancelled = stop_event.wait(delay) or self._stop_events.get(camera_id) is not stop_event
+        if cancelled:
+            logger.info(f'重连已取消（收到停止请求或新指令）: cameraId={camera_id}')
+            return
+        logger.info(f'开始第 {attempt} 次重连: cameraId={camera_id}')
+
+        ok = self._start_stream(camera_id, params['trans_type'], params['push_url'],
+                                params['username'], params['password'], is_restart=True)
+        if not ok:
+            # 启动阶段就直接失败（如服务不可用），继续按退避重试
+            self._schedule_restart(camera_id)
 
     def _log_ffmpeg_tail(self, camera_id, log_path, lines=20):
         """异常退出时打印 ffmpeg 日志尾部，用于定位退出码原因"""
