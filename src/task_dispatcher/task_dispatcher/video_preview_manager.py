@@ -42,6 +42,8 @@ class VideoPreviewManager:
         # 存储当前运行的视频流进程
         self.running_streams = {}
         self.streams_lock = Lock()
+        # 记录被主动停止的摄像头，避免把正常停止的退出码当成故障
+        self._expected_stop = set()
         
         # 摄像头RTSP地址配置
         self.camera_rtsp_addresses = {CAMERAID: CAMERA01_URL}
@@ -208,12 +210,20 @@ class VideoPreviewManager:
             # 记录命令
             logger.info(f'准备启动视频流命令: {" ".join(cmd)}')
             
-            # 启动ffmpeg子进程，使用devnull避免输出阻塞
+            # ffmpeg 的 stderr 落地到文件：devnull 会让异常退出（如 returncode 187）
+            # 完全失去原因，异常退出时打印日志尾部便于定位
+            log_path = os.path.join('/tmp', f'ffmpeg_{camera_id}.log')
             devnull = open(os.devnull, 'w')
+            try:
+                log_file = open(log_path, 'w')
+            except OSError as e:
+                logger.warning(f'无法创建 ffmpeg 日志 {log_path}: {e}，回退到 devnull')
+                log_path, log_file = '', devnull
+            # 启动ffmpeg子进程，stdout 丢弃、stderr 写日志文件，避免输出阻塞
             process = subprocess.Popen(
                 cmd,
                 stdout=devnull,
-                stderr=devnull,
+                stderr=log_file,
                 shell=False,
                 preexec_fn=os.setsid  # 设置进程组，方便后续kill整个进程组
             )
@@ -228,7 +238,8 @@ class VideoPreviewManager:
                 }
             
             # 启动一个线程来监控进程状态
-            monitor_thread = Thread(target=self._monitor_stream, args=(camera_id, process), daemon=True)
+            monitor_thread = Thread(target=self._monitor_stream,
+                                    args=(camera_id, process, log_path, log_file), daemon=True)
             monitor_thread.start()
             
             logger.info(f'启动预览[{camera_id}] 推送至[{push_url}] 成功')
@@ -255,6 +266,7 @@ class VideoPreviewManager:
                 
                 stream_info = self.running_streams.pop(camera_id)
                 process = stream_info['process']
+                self._expected_stop.add(camera_id)
             
             # 尝试优雅地终止进程
             try:
@@ -278,7 +290,7 @@ class VideoPreviewManager:
         except Exception as e:
             logger.error(f'停止视频流时出错: {str(e)}')
             return False
-    def _monitor_stream(self, camera_id, process):
+    def _monitor_stream(self, camera_id, process, log_path='', log_file=None):
         """
         监控视频流进程状态
         
@@ -294,12 +306,17 @@ class VideoPreviewManager:
             with self.streams_lock:
                 if camera_id in self.running_streams:
                     del self.running_streams[camera_id]
-            
+                expected_stop = camera_id in self._expected_stop
+                self._expected_stop.discard(camera_id)
+
             # 检查返回码
             if process.returncode != 0:
-                logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
-                # 由于我们使用了devnull，这里无法获取stderr
-                logger.error(f'视频流可能需要重新启动: cameraId={camera_id}')
+                if expected_stop:
+                    # 由 _stop_stream 主动终止（如切换推流地址），不是故障
+                    logger.info(f'视频流已按请求停止: cameraId={camera_id}, returncode={process.returncode}')
+                else:
+                    logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
+                    self._log_ffmpeg_tail(camera_id, log_path)
             else:
                 logger.info(f'视频流进程正常退出: cameraId={camera_id}')
                 
@@ -309,7 +326,27 @@ class VideoPreviewManager:
             with self.streams_lock:
                 if camera_id in self.running_streams:
                     del self.running_streams[camera_id]
-    
+        finally:
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+
+    def _log_ffmpeg_tail(self, camera_id, log_path, lines=20):
+        """异常退出时打印 ffmpeg 日志尾部，用于定位退出码原因"""
+        if not log_path or not os.path.isfile(log_path):
+            logger.error(f'视频流可能需要重新启动: cameraId={camera_id}（无 ffmpeg 日志）')
+            return
+        try:
+            with open(log_path, 'r', errors='ignore') as f:
+                tail = f.read().splitlines()[-lines:]
+        except OSError as e:
+            logger.error(f'读取 ffmpeg 日志失败: {e}')
+            return
+        logger.error(f'ffmpeg 日志尾部（{log_path}）:{os.linesep}' + os.linesep.join(tail))
+        logger.error(f'视频流可能需要重新启动: cameraId={camera_id}')
+
     def send_ack_response(self, original_message, status, error, body):
         """
         发送ACK响应消息
