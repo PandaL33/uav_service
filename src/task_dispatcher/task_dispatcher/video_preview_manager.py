@@ -11,7 +11,8 @@ import os
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
                     PREVIEW_HEIGHT, PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
-                    PREVIEW_START_TIMEOUT, PREVIEW_IO_TIMEOUT, PREVIEW_ACK_CONTINUE)
+                    PREVIEW_START_TIMEOUT, PREVIEW_IO_TIMEOUT, PREVIEW_ACK_CONTINUE,
+                    PREVIEW_HW_DECODE)
 import cv2
 
 # 配置日志
@@ -21,6 +22,61 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger('video_preview_manager')
+
+# 硬件编解码能力探测缓存：None=未探测，False=不可用，其余为探测到的名字
+_HW_DECODER = None
+_HW_ENCODER = None
+# 运行时硬解启动失败后置 True，本进程后续只用 CPU 解码
+_HW_DECODE_DISABLED = False
+
+
+def _ffmpeg_supports(kind, name):
+    """查询 ffmpeg 是否具备某个编码器/解码器（kind: 'encoders' 或 'decoders'）"""
+    try:
+        result = subprocess.run(['ffmpeg', '-hide_banner', '-' + kind],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+        return name in result.stdout.decode('utf-8', 'ignore')
+    except Exception as e:
+        logger.warning(f'探测 ffmpeg {kind} 失败，按不支持处理: {e}')
+        return False
+
+
+def _hw_decode_decoder():
+    """
+    返回输入侧可用的 MPP 硬解码器名，不可用返回 None（走 CPU 软解）。
+
+    不指定输入解码器时 ffmpeg 默认用软件 hevc 解码，1080p 全帧率软解能吃满一个
+    小核；这里只在做重编码的 h265 档位尝试硬解。
+    """
+    global _HW_DECODER
+    if not PREVIEW_HW_DECODE or _HW_DECODE_DISABLED:
+        return None
+    if _HW_DECODER is None:
+        name = 'hevc_rkmpp' if CODEC == 'h265' else 'h264_rkmpp'
+        _HW_DECODER = name if _ffmpeg_supports('decoders', name) else False
+        logger.info(f'硬件解码探测: {name} -> {_HW_DECODER or "不可用，回退 CPU 软解"}')
+    return _HW_DECODER or None
+
+
+def _video_encoder():
+    """优先 MPP 硬编 H.264，平台没有就回退 libx264 软编；都没有返回 None"""
+    global _HW_ENCODER
+    if _HW_ENCODER is None:
+        _HW_ENCODER = ''
+        for name in ('h264_rkmpp', 'libx264'):
+            if _ffmpeg_supports('encoders', name):
+                _HW_ENCODER = name
+                break
+        logger.info(f'视频编码器选择: {_HW_ENCODER or "无可用 H.264 编码器"}')
+    return _HW_ENCODER or None
+
+
+def _disable_hw_decode(reason):
+    """硬解起不来时永久退回 CPU 解码，避免每次都撞同一个坑"""
+    global _HW_DECODER, _HW_DECODE_DISABLED
+    _HW_DECODE_DISABLED = True
+    _HW_DECODER = False
+    logger.warning(f'已禁用硬件解码，后续只用 CPU 软解: {reason}')
 
 class VideoPreviewManager:
     """
@@ -50,6 +106,8 @@ class VideoPreviewManager:
         self._stream_params = {}
         self._restart_counts = {}
         self._stop_events = {}
+        # 本次启动是否用了硬件解码，供失败后回退 CPU 重试判断
+        self._used_hw_decode = False
         
         # 摄像头RTSP地址配置
         self.camera_rtsp_addresses = {CAMERAID: CAMERA01_URL}
@@ -113,6 +171,11 @@ class VideoPreviewManager:
             
             # 启动新的视频流
             success = self._start_stream(camera_id, trans_type, push_url, username, password)
+
+            if not success and self._used_hw_decode:
+                # 硬解在这台机器/这路码流上起不来：整体退回 CPU 软解重试一次，后续不再试硬解
+                _disable_hw_decode(f'cameraId={camera_id} 硬件解码启动失败')
+                success = self._start_stream(camera_id, trans_type, push_url, username, password)
             
             if success:
                 logger.info(f'成功启动视频流: cameraId={camera_id}, type={trans_type}, url={push_url}')
@@ -192,6 +255,7 @@ class VideoPreviewManager:
                     self._restart_counts[camera_id] = 0
 
             cmd = []
+            self._used_hw_decode = False
             if CODEC == "h264":
                 # copy 模式不能加滤镜，无法缩放分辨率；明确告警，避免配置了降分辨率却不生效
                 if PREVIEW_HEIGHT > 0:
@@ -210,6 +274,11 @@ class VideoPreviewManager:
                     '-y'                       # 覆盖已存在的文件
                 ]
             elif CODEC == "h265":
+                # 重编码档位必须有 H.264 编码器，一个都没有就直接失败（别静默起个必退的进程）
+                encoder = _video_encoder()
+                if not encoder:
+                    logger.error('无可用 H.264 编码器（h264_rkmpp / libx264 均不支持），无法推流')
+                    return False
                 # 先按目标帧率抽帧再缩放：缩放只作用于输出帧，避免对全帧率的解码帧做软件缩放
                 vf = f'fps={PREVIEW_FPS}'
                 if PREVIEW_HEIGHT > 0:
@@ -218,9 +287,16 @@ class VideoPreviewManager:
                     'ffmpeg',
                     '-rtsp_transport', 'tcp',  # 使用TCP传输，提高稳定性
                     '-timeout', '5000000',    # 设置超时时间，单位微秒
+                ]
+                # 输入侧显式指定 MPP 硬解码器，否则默认软件 hevc 解码，1080p 全帧率能吃满一个小核
+                hw_decoder = _hw_decode_decoder()
+                self._used_hw_decode = hw_decoder is not None
+                if hw_decoder:
+                    cmd += ['-c:v', hw_decoder]
+                cmd += [
                     '-i', rtsp_url,            # 输入RTSP地址
                     '-vf', vf,                 # 抽帧（fps）+ 降分辨率（scale）
-                    '-c:v', 'h264_rkmpp',      # H.265 输入转 H.264，硬编码
+                    '-c:v', encoder,           # H.265 输入转 H.264（优先硬编，回退 libx264）
                     '-pix_fmt', 'yuv420p',
                     '-profile:v', 'baseline',
                     '-r', str(PREVIEW_FPS),    # 输出限帧
@@ -230,6 +306,8 @@ class VideoPreviewManager:
                     '-f', 'flv',               # 输出格式为FLV
                     '-y'                       # 覆盖已存在的文件
                 ]
+                if self._used_hw_decode:
+                    logger.info(f'使用硬件解码 {hw_decoder} + 编码 {encoder}')
             
             # 输出侧读写超时：外网断开但 TCP 未报错时，ffmpeg 会一直卡在 socket 写入上；
             # 加超时让它自行退出，交给“进程退出即重连”处理，不必依赖它的进度日志
