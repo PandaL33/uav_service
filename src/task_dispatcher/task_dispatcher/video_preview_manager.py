@@ -10,7 +10,7 @@ import signal
 import os
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
-                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
+                    PREVIEW_HEIGHT, PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
                     PREVIEW_START_TIMEOUT, PREVIEW_IO_TIMEOUT, PREVIEW_ACK_CONTINUE)
 import cv2
 
@@ -193,6 +193,10 @@ class VideoPreviewManager:
 
             cmd = []
             if CODEC == "h264":
+                # copy 模式不能加滤镜，无法缩放分辨率；明确告警，避免配置了降分辨率却不生效
+                if PREVIEW_HEIGHT > 0:
+                    logger.warning(f'CODEC=h264 为流拷贝模式，无法缩放分辨率，输出保持相机原始分辨率'
+                                   f'（需要 {PREVIEW_HEIGHT}P 请切到 CODEC=h265）')
                 # 构建ffmpeg命令，参考用户提供的C++实现
                 cmd = [
                     'ffmpeg',
@@ -206,12 +210,17 @@ class VideoPreviewManager:
                     '-y'                       # 覆盖已存在的文件
                 ]
             elif CODEC == "h265":
+                # 先按目标帧率抽帧再缩放：缩放只作用于输出帧，避免对全帧率的解码帧做软件缩放
+                vf = f'fps={PREVIEW_FPS}'
+                if PREVIEW_HEIGHT > 0:
+                    vf += f',scale=-2:{PREVIEW_HEIGHT}'
                 cmd = [
                     'ffmpeg',
                     '-rtsp_transport', 'tcp',  # 使用TCP传输，提高稳定性
                     '-timeout', '5000000',    # 设置超时时间，单位微秒
                     '-i', rtsp_url,            # 输入RTSP地址
-                    '-c:v', 'h264_rkmpp',            # 视频使用copy模式，不重新编码
+                    '-vf', vf,                 # 抽帧（fps）+ 降分辨率（scale）
+                    '-c:v', 'h264_rkmpp',      # H.265 输入转 H.264，硬编码
                     '-pix_fmt', 'yuv420p',
                     '-profile:v', 'baseline',
                     '-r', str(PREVIEW_FPS),    # 输出限帧
