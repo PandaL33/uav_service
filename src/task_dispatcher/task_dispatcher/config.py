@@ -48,8 +48,9 @@ PREVIEW_FPS = 5
 
 # 实时视频推流断流后的自动重连策略
 PREVIEW_RETRY_MAX = 0        # 连续失败重连次数上限；0=不限次数（外网中断恢复前一直重试）
-PREVIEW_RETRY_DELAY = 2      # 首次重连等待秒数，之后翻倍（单次上限 30s）
+PREVIEW_RETRY_DELAY = 2      # 每次重连固定等待秒数（飞机常进出信号盲区，不逐级递增延时）
 PREVIEW_RETRY_RESET_SEC = 30 # 连续运行超过该时长视为稳定，失败计数清零
+PREVIEW_STALL_TIMEOUT = 20   # ffmpeg 进度日志超过该秒数无增长即判定卡死（0=关闭检测）
 
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True

@@ -10,7 +10,7 @@ import signal
 import os
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
-                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC)
+                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,                    PREVIEW_STALL_TIMEOUT)
 import cv2
 
 # 配置日志
@@ -321,8 +321,34 @@ class VideoPreviewManager:
             process: 进程对象
         """
         try:
-            # 等待进程结束
-            process.wait()
+            # 轮询等待进程结束：外网（RTMP）断连时 ffmpeg 会卡在 socket 写入上长时间不退出，
+            # 只等 process.wait() 就永远不会触发重连，平台侧表现为一直黑屏。
+            # 因此用 ffmpeg 进度日志是否增长判断“假活”，超时无进展即强制结束并按断流重连。
+            stalled = False
+            last_size = self._ffmpeg_log_size(log_path) if log_path else -1
+            last_change = time.time()
+            while process.poll() is None:
+                try:
+                    process.wait(timeout=1.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if not log_path or PREVIEW_STALL_TIMEOUT <= 0:
+                    continue
+                size = self._ffmpeg_log_size(log_path)
+                if size != last_size:
+                    last_size, last_change = size, time.time()
+                    continue
+                if time.time() - last_change >= PREVIEW_STALL_TIMEOUT:
+                    stalled = True
+                    logger.error(f'视频流 {PREVIEW_STALL_TIMEOUT}s 内无输出进展（推流链路已断开），强制结束进程: '
+                                 f'cameraId={camera_id}, pid={process.pid}')
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        process.wait(timeout=5)
+                    except Exception as e:
+                        logger.error(f'结束卡死视频流失败: {str(e)}')
+                    break
             
             # 进程结束后，清理资源
             with self.streams_lock:
@@ -337,6 +363,9 @@ class VideoPreviewManager:
             if expected_stop:
                 # 由 _stop_stream 主动终止（如切换推流地址），不是故障
                 logger.info(f'视频流已按请求停止: cameraId={camera_id}, returncode={process.returncode}')
+            elif stalled:
+                self._log_ffmpeg_tail(camera_id, log_path)
+                self._schedule_restart(camera_id)
             elif process.returncode != 0:
                 logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
                 self._log_ffmpeg_tail(camera_id, log_path)
@@ -360,8 +389,16 @@ class VideoPreviewManager:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _ffmpeg_log_size(log_path):
+        """ffmpeg 日志当前大小，读不到返回 -1（进程刚建文件时可能尚未落盘）"""
+        try:
+            return os.path.getsize(log_path)
+        except OSError:
+            return -1
+
     def _schedule_restart(self, camera_id):
-        """断流后按指数退避重连；由停止事件取消，连续失败超过上限则放弃"""
+        """断流后按固定间隔持续重连；由停止事件取消，上限为 0 时永不放弃"""
         with self.streams_lock:
             params = self._stream_params.get(camera_id)
             stop_event = self._stop_events.get(camera_id)
@@ -375,9 +412,10 @@ class VideoPreviewManager:
             logger.error(f'视频流连续 {PREVIEW_RETRY_MAX} 次重连失败，放弃重连: cameraId={camera_id}')
             return
 
-        delay = min(PREVIEW_RETRY_DELAY * (2 ** (attempt - 1)), 30)
+        # 固定间隔重连：飞机进出信号盲区后链路可能几十秒才恢复，递增延时会拖慢画面恢复
+        delay = max(0.0, float(PREVIEW_RETRY_DELAY))
         limit = f'/{PREVIEW_RETRY_MAX}' if PREVIEW_RETRY_MAX > 0 else ''
-        logger.warning(f'视频流断开，{delay}s 后第 {attempt}{limit} 次重连: cameraId={camera_id}')
+        logger.warning(f'视频流断开，{delay:g}s 后第 {attempt}{limit} 次重连: cameraId={camera_id}')
         # 等待期间可能收到停止请求，或已下发新的播放命令（停止事件被替换）
         cancelled = stop_event.wait(delay) or self._stop_events.get(camera_id) is not stop_event
         if cancelled:
@@ -388,7 +426,7 @@ class VideoPreviewManager:
         ok = self._start_stream(camera_id, params['trans_type'], params['push_url'],
                                 params['username'], params['password'], is_restart=True)
         if not ok:
-            # 启动阶段就直接失败（如服务不可用），继续按退避重试
+            # 启动阶段就直接失败（如服务不可用），继续按固定间隔重试
             self._schedule_restart(camera_id)
 
     def _log_ffmpeg_tail(self, camera_id, log_path, lines=20):
