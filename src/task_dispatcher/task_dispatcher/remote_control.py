@@ -14,7 +14,6 @@ from task_dispatcher.ptz_control import PtzControl
 from .config import ROBOT_TYPE, FFR_SERVER_URL
 from uav_command_sender import UavCommandSender
 from uav_mission_manager import UavMissionManager
-from dock_control_client import DockControlClient
 # 配置日志
 logger = logging.getLogger('task_dispatcher.remote_control')
 
@@ -40,8 +39,8 @@ class RemoteControl:
         self.ros_topic_subscriber: Ros2TopicSubscriber = ros_topic_subscriber
         self.uav_mission_manager = UavMissionManager(node, ros_topic_subscriber)
         self.uav_command_sender = UavCommandSender(node, topic_name='/uav_command')
-        # 机舱控制
-        self.dock_control_client = DockControlClient(node)
+        # 机舱控制：复用 mission_manager 的实例，避免同一节点重复创建几十个 DDS 实体
+        self.dock_control_client = self.uav_mission_manager.dock_control_client
         
         
         # 速度映射表 (low:0.1, mid:0.25, high:0.5)

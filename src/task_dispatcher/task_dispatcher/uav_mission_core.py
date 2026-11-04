@@ -29,9 +29,11 @@ class UavMissionCore():
         self.node = node
         self.topic_subscriber: Optional[Ros2TopicSubscriber] = topic_subscriber
         # 创建兼容PX4的QoS配置
+        # PX4 的 /fmu/out/* 发布端是 BEST_EFFORT + VOLATILE；订阅端若请求 TRANSIENT_LOCAL，
+        # durability 不兼容会收不到数据，且 rclpy 的 incompatible-QoS 事件持续就绪，导致 spin 空转占满单核
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1
         )
