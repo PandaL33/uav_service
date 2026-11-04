@@ -12,7 +12,7 @@ import re
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
                     PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
-                    PREVIEW_STALL_TIMEOUT, PREVIEW_FIRST_FRAME_TIMEOUT)
+                    PREVIEW_STALL_TIMEOUT, PREVIEW_FIRST_FRAME_TIMEOUT, PREVIEW_ACK_CONTINUE)
 import cv2
 
 # 配置日志
@@ -105,6 +105,10 @@ class VideoPreviewManager:
                 logger.warning(f'不支持的传输类型: {trans_type}，将使用默认值: RTMP')
                 trans_type = 'RTMP'
             
+            # 先回「继续」：等首帧要几秒（RTSP 握手 + publish），后台按固定超时判失败，
+            # 收到 100 会继续等待；真正可播与否由下面的终态 ACK 决定
+            self.send_ack_response(message_data, PREVIEW_ACK_CONTINUE, 'continue', {})
+            
             # 停止该摄像头当前可能正在运行的流
             self._stop_stream(camera_id)
             
@@ -116,7 +120,7 @@ class VideoPreviewManager:
                 self.send_ack_response(message_data, 200, 'ok', {})
             else:
                 logger.error(f'启动视频流失败: cameraId={camera_id}')
-                self.send_ack_response(message_data, 500, '启动视频流失败', {})
+                self.send_ack_response(message_data, 500, f'启动视频流失败（{PREVIEW_FIRST_FRAME_TIMEOUT}s 内未出首帧）', {})
                 
         except Exception as e:
             logger.error(f'处理播放视频命令时出错: {str(e)}')
