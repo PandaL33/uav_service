@@ -10,35 +10,62 @@ import time
 # 配置日志
 logger = logging.getLogger('dock_control_client')
 
+def _lazy_client(service_name):
+    """
+    按需创建服务客户端。
+
+    rclpy 单线程 executor 每处理一条消息都要用节点的全部实体重建一次 WaitSet，
+    空闲的服务客户端虽不产生消息，却会永久计入每轮重建开销。机舱服务只在起飞/降落
+    时用，改成首次调用才创建（call_service 里的 wait_for_service 会覆盖发现耗时）。
+    """
+    attr = f'_client_{service_name}'
+
+    def _getter(self):
+        client = getattr(self, attr, None)
+        if client is None:
+            client = self.node.create_client(Trigger, f'/dock/{service_name}')
+            setattr(self, attr, client)
+        return client
+
+    return property(_getter)
+
+
 class DockControlClient:
     """
     无人机机库控制客户端
     """
 
+    # 同一节点共用一个实例：多处实例化会重复订阅 /dock/* 并成倍增加节点实体数
+    _instances = {}
+
+    def __new__(cls, node):
+        instance = cls._instances.get(id(node))
+        # id 可能被回收后的新节点复用，因此还要确认是同一个 node
+        if instance is None or getattr(instance, 'node', None) is not node:
+            instance = super().__new__(cls)
+            cls._instances[id(node)] = instance
+        return instance
+
+    # --- 服务客户端（首次使用时才创建） ---
+    charge_open_client = _lazy_client('charge_open')
+    charge_close_client = _lazy_client('charge_close')
+    cover_open_client = _lazy_client('cover_open')
+    cover_close_client = _lazy_client('cover_close')
+    putter_open_client = _lazy_client('putter_open')
+    putter_close_client = _lazy_client('putter_close')
+    battery_activation_client = _lazy_client('battery_activation')
+    drone_discharge_start_client = _lazy_client('drone_discharge_start')
+    drone_discharge_stop_client = _lazy_client('drone_discharge_stop')
+    drone_open_client = _lazy_client('drone_open')
+    drone_close_client = _lazy_client('drone_close')
+
     def __init__(self, node):
+        # 复用实例时跳过重复初始化（否则会重复创建订阅者并清空进度状态）
+        if getattr(self, '_initialized', False):
+            return
+        self._initialized = True
         self.node = node
         
-        # --- 服务客户端 ---
-        # 充电和放电
-        self.charge_open_client = self.node.create_client(Trigger, '/dock/charge_open')
-        self.charge_close_client = self.node.create_client(Trigger, '/dock/charge_close')
-        # 机舱打开和关闭
-        self.cover_open_client = self.node.create_client(Trigger, '/dock/cover_open')
-        self.cover_close_client = self.node.create_client(Trigger, '/dock/cover_close')
-        # 推合杆
-        self.putter_open_client = self.node.create_client(Trigger, '/dock/putter_open')
-        self.putter_close_client = self.node.create_client(Trigger, '/dock/putter_close')
-        
-        # 激活电池服务
-        self.battery_activation_client = self.node.create_client(Trigger, '/dock/battery_activation')
-        # 开始放电服务
-        self.drone_discharge_start_client = self.node.create_client(Trigger, '/dock/drone_discharge_start')
-        # 停止放电服务
-        self.drone_discharge_stop_client = self.node.create_client(Trigger, '/dock/drone_discharge_stop')
-        # 无人机开机
-        self.drone_open_client = self.node.create_client(Trigger, '/dock/drone_open')
-        # 无人机关机
-        self.drone_close_client = self.node.create_client(Trigger, '/dock/drone_close')
         
         # --- 订阅者 ---
         self.progress_sub = self.node.create_subscription(
