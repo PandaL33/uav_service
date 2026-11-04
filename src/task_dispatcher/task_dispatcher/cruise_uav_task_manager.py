@@ -33,6 +33,7 @@ from .config import ENABLE_PREFLIGHT_CHECK, ENABLE_DOCK_CONTROL, WIND_SPEED_THRE
 from .config import WAYPOINT_CONSEC_LIMIT  # 连续不可达航点数 → 返航的阈值
 from uav_command_sender import UavCommandSender
 from dock_control_client import DockControlClient
+from ros_client_cache import lazy_client
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
 from task_dispatcher.uav_action_manager import UavActionManager
 from auth_utils import AuthManager
@@ -58,6 +59,9 @@ class CruiseUavTaskManager:
     无人机巡检任务管理器，负责处理巡检任务相关命令
     支持：设置任务、获取任务、执行任务和停止任务
     """
+
+    # 点云保存服务客户端（首次使用才注册，空闲时不占用节点实体）
+    map_save_client = lazy_client(Trigger, '/map_save')
     
     def __init__(self, node, mqtt_client, response_topic, ros_topic_subscriber, version='1.0', robot_sn='', 
         ptz_controller=None, server_url=None, perform_action_manager=None, map_manager=None):
@@ -114,8 +118,6 @@ class CruiseUavTaskManager:
         if ENABLE_DOCK_CONTROL:
             threading.Thread(target=self._dock_charge_watchdog_loop, daemon=True,
                              name='dock_charge_watchdog').start()
-        # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
-        self.map_save_client = self.node.create_client(Trigger, '/map_save')
         # offboard 心跳监听：ego_planner.service（含 rkdrone_communication）启动后
         # 才会持续发布 /fmu/in/offboard_control_mode，用它确认通信链路已就绪再切 OFFBOARD
         self._offboard_mode_last_time = 0.0
