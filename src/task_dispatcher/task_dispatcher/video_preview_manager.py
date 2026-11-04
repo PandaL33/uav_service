@@ -384,7 +384,6 @@ class VideoPreviewManager:
                 except Exception:
                     pass
 
-    @staticmethod
     def _confirm_stream_started(self, camera_id, process, log_path):
         """启动确认：确认窗口内进程未退出即认为推流链路可用
 
