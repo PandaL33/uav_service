@@ -373,7 +373,7 @@ class TaskDispatcherNode(Node):
                 'STOPBUILDMAP': lambda: self._handle_stop_build_map(message_data, '停止地图构建'),
                 'SETCRUISETASK': lambda: self._handle_cruise_task(message_data, '设置并启动巡检任务'),
                 'GETCRUISETASK': lambda: self._handle_cruise_task(message_data, '获取巡检任务'),
-                'EXECRUISetask': lambda: self._handle_cruise_task(message_data, '启动巡检任务'),
+                'EXECCRUISETASK': lambda: self._handle_cruise_task(message_data, '启动巡检任务'),
                 'STOPCRUISETASK': lambda: self._handle_cruise_task(message_data, '停止巡检任务'),
                 #'ALARMNOTIFY': lambda: self._handle_alarm_notify(message_data)
                 'GETPTZINFO': lambda: self._handle_get_ptz_info(message_data, '获取PTZ信息'),
