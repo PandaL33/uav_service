@@ -8,9 +8,11 @@ import json
 from threading import Thread, Lock, Event
 import signal
 import os
+import re
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
-                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,                    PREVIEW_STALL_TIMEOUT)
+                    PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
+                    PREVIEW_STALL_TIMEOUT, PREVIEW_FIRST_FRAME_TIMEOUT)
 import cv2
 
 # 配置日志
@@ -260,6 +262,16 @@ class VideoPreviewManager:
                                     args=(camera_id, process, log_path, log_file), daemon=True)
             monitor_thread.start()
             
+            # 平台播放命令要等第一帧真正推出再回 ACK：Popen 成功只代表进程起来了，
+            # 此时 RTSP 握手/编码器初始化/RTMP publish 都还没完成，平台收到 200 立刻拉流必失败。
+            # 自动重连不等首帧，保证断流后仍按固定间隔连续重试。
+            if not is_restart and not self._wait_first_frame(camera_id, log_path,
+                                                            PREVIEW_FIRST_FRAME_TIMEOUT):
+                logger.error(f'视频流 {PREVIEW_FIRST_FRAME_TIMEOUT}s 内未输出首帧，推流链路可能不可达: '
+                             f'cameraId={camera_id}, url={push_url}')
+                self._stop_stream(camera_id)
+                return False
+            
             logger.info(f'启动预览[{camera_id}] 推送至[{push_url}] 成功')
             return True
             
@@ -397,6 +409,32 @@ class VideoPreviewManager:
         except OSError:
             return -1
 
+    @staticmethod
+    def _read_log_tail(log_path, size=8192):
+        """读取 ffmpeg 日志尾部（进度行以 \r 刷新，只需看最新一段）"""
+        try:
+            with open(log_path, 'rb') as fp:
+                fp.seek(0, os.SEEK_END)
+                fp.seek(max(0, fp.tell() - size))
+                return fp.read().decode('utf-8', errors='ignore')
+        except OSError:
+            return ''
+
+    def _wait_first_frame(self, camera_id, log_path, timeout):
+        """等待 ffmpeg 输出第一帧（RTSP 握手 + 编码器初始化 + publish 全部完成）
+
+        进度行 frame=<n> 只有真的出帧才会出现，用它作为「流可用」的证据；
+        日志不可用（回退 devnull）时不阻塞，退回原有乐观 ACK。
+        """
+        if timeout <= 0 or not log_path:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if re.search(r'frame=\s*[1-9]', self._read_log_tail(log_path)):
+                return True
+            time.sleep(0.25)
+        return False
+
     def _schedule_restart(self, camera_id):
         """断流后按固定间隔持续重连；由停止事件取消，上限为 0 时永不放弃"""
         with self.streams_lock:
@@ -475,6 +513,12 @@ class VideoPreviewManager:
         except Exception as e:
             logger.error(f'发送视频预览响应失败: {str(e)}')
     
+    def _is_streaming(self, camera_id):
+        """该摄像头是否有存活的推流进程"""
+        with self.streams_lock:
+            info = self.running_streams.get(camera_id)
+            return bool(info and info['process'].poll() is None)
+
     def get_camera_status(self):
         """
         获取所有摄像机的状态信息
@@ -501,6 +545,11 @@ class VideoPreviewManager:
                 status = 0  # 默认状态：离线、其他状态暂不设置
                 # 检查在线状态：通过ping摄像头IP地址来判断
                 rtsp_url = self.camera_rtsp_addresses[camera_id]
+                # 正在推流时直接报「在线+预览」，不再另起 ffmpeg 探测：
+                # 推流进程已占用同一路 RTSP，再开探测会抢流导致误报离线
+                if self._is_streaming(camera_id):
+                    camera_status_list.append({'cameraId': camera_id, 'status': 1 | 4})
+                    continue
                 # 使用OpenCV尝试打开RTSP流来检测摄像头是否在线
                 try:
                     # 设置视频捕获超时时间

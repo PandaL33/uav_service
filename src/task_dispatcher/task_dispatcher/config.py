@@ -51,6 +51,7 @@ PREVIEW_RETRY_MAX = 0        # 连续失败重连次数上限；0=不限次数�
 PREVIEW_RETRY_DELAY = 2      # 每次重连固定等待秒数（飞机常进出信号盲区，不逐级递增延时）
 PREVIEW_RETRY_RESET_SEC = 30 # 连续运行超过该时长视为稳定，失败计数清零
 PREVIEW_STALL_TIMEOUT = 20   # ffmpeg 进度日志超过该秒数无增长即判定卡死（0=关闭检测）
+PREVIEW_FIRST_FRAME_TIMEOUT = 8  # 播放命令等首帧推出的上限秒数，超时则回 ACK 500
 
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True
