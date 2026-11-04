@@ -58,6 +58,10 @@ PREVIEW_START_TIMEOUT = 12   # 播放命令的启动确认窗口秒数：期间�
 PREVIEW_IO_TIMEOUT = 10      # ffmpeg 输出侧读写超时秒数（0=不加），断链时让它自行退出触发重连
 PREVIEW_ACK_CONTINUE = 100     # 播放命令先回该状态码表示“受理中/继续”，首帧后再补终态 ACK
 
+# 预览推流是否尝试 Rockchip MPP 硬解（输入侧指定 hevc_rkmpp/h264_rkmpp）
+# 关闭或平台不支持时自动回退 CPU 软解；编码器同理（h264_rkmpp → libx264）
+PREVIEW_HW_DECODE = True
+
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True
 
