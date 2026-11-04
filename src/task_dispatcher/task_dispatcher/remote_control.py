@@ -14,6 +14,7 @@ from task_dispatcher.ptz_control import PtzControl
 from .config import ROBOT_TYPE, FFR_SERVER_URL
 from uav_command_sender import UavCommandSender
 from uav_mission_manager import UavMissionManager
+from ros_client_cache import lazy_client
 # 配置日志
 logger = logging.getLogger('task_dispatcher.remote_control')
 
@@ -21,6 +22,10 @@ class RemoteControl:
     """
     远程控制类，负责处理RemoteControl命令并调用相应的ROS服务
     """
+
+    # 四足服务客户端（首次使用才注册，空闲时不占用节点实体）
+    move_client = lazy_client(Move, '/rkbot/move')
+    mode_client = lazy_client(SetCtrlMode, '/rkbot/setctrlmode')
     
     def __init__(self, node, mqtt_client, response_topic, ros_topic_subscriber, ptz_controller):
         """
@@ -406,8 +411,8 @@ class RemoteControl:
         """
         调用移动服务
         """
-        # 创建服务客户端
-        move_client = self.node.create_client(Move, '/rkbot/move')
+        # 复用缓存的客户端：每次调用都 create_client 会永久增加节点实体数
+        move_client = self.move_client
         
         # 等待服务可用
         if not move_client.wait_for_service(timeout_sec=3.0):
@@ -467,8 +472,8 @@ class RemoteControl:
         """
         调用设置控制模式服务
         """
-        # 创建服务客户端
-        mode_client = self.node.create_client(SetCtrlMode, '/rkbot/setctrlmode')
+        # 复用缓存的客户端：每次调用都 create_client 会永久增加节点实体数
+        mode_client = self.mode_client
         
         # 等待服务可用
         if not mode_client.wait_for_service(timeout_sec=3.0):

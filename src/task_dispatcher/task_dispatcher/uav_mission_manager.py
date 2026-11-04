@@ -1,7 +1,6 @@
 
 from std_msgs.msg import String
 from geometry_msgs.msg import Point
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleStatus, VehicleCommand, VehicleLocalPosition
 import math
 import gpiod
@@ -28,15 +27,6 @@ class UavMissionManager():
 
         self.node = node
         self.topic_subscriber: Optional[Ros2TopicSubscriber] = topic_subscriber
-        # 创建兼容PX4的QoS配置
-        # PX4 的 /fmu/out/* 发布端是 BEST_EFFORT + VOLATILE；订阅端若请求 TRANSIENT_LOCAL，
-        # durability 不兼容会收不到数据，且 rclpy 的 incompatible-QoS 事件持续就绪，导致 spin 空转占满单核
-        qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1
-        )
 
         # 创建话题订阅器，接收命令
         self.command_sub = self.node.create_subscription(
@@ -65,22 +55,11 @@ class UavMissionManager():
             10
         )
 
-        # 创建订阅者，使用与PX4兼容的QoS
-        self.vehicle_status_sub = self.node.create_subscription(
-            VehicleStatus,
-            '/fmu/out/vehicle_status',
-            self.vehicle_status_callback,
-            qos_profile
-        )
-
-        self.vehicle_local_position_sub = self.node.create_subscription(
-            VehicleLocalPosition,
-            '/fmu/out/vehicle_local_position',
-            self.vehicle_local_position_callback,
-            qos_profile
-        )
-
         # 初始化参数
+        # 车辆状态与本地位置改为读取 Ros2TopicSubscriber 的共享缓存，不再自行订阅：
+        # 同一话题多订阅一份，executor 每收到一条消息都要重建一次 WaitSet，
+        # 而 /fmu/out/vehicle_local_position 约 82Hz，重复订阅等于把这部分开销翻倍。
+        # 首帧到达前维持默认值，与原订阅逻辑一致
         self.vehicle_status = VehicleStatus()
         self.vehicle_local_position = VehicleLocalPosition()
         
@@ -212,16 +191,19 @@ class UavMissionManager():
         except Exception as e:
             logger.error(f'GPIO 控制异常：{e}')
 
-    def vehicle_status_callback(self, msg):
-        """车辆状态回调函数"""
-        self.vehicle_status = msg
-
-    def vehicle_local_position_callback(self, msg):
-        """车辆本地位置回调函数"""
-        self.vehicle_local_position = msg
+    def _sync_px4_state(self):
+        """从 Ros2TopicSubscriber 的共享缓存刷新状态，取代原先的重复订阅"""
+        subscriber = self.topic_subscriber
+        if subscriber is None:
+            return
+        if subscriber.vehicle_status is not None:
+            self.vehicle_status = subscriber.vehicle_status
+        if subscriber.vehicle_local_position is not None:
+            self.vehicle_local_position = subscriber.vehicle_local_position
 
     def timer_callback(self):
         """定时器回调函数，控制无人机状态转换"""
+        self._sync_px4_state()
         if self.current_state == 'IDLE':
             current_time = time.time()
             if current_time - self.last_log_time >= self.log_interval:

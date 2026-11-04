@@ -27,6 +27,7 @@ import numpy as np
 from PIL import Image, ImageOps
 from task_dispatcher.point_cloud_crop import PointCloudCrop
 from auth_utils import AuthManager 
+from ros_client_cache import lazy_client
 
 # 配置日志
 logger = logging.getLogger('task_dispatcher.point_cloud_manager')
@@ -36,6 +37,9 @@ class PointCloudManager:
     点云文件处理器
     支持：
     """
+
+    # 点云保存服务客户端（首次使用才注册，空闲时不占用节点实体）
+    map_save_client = lazy_client(Trigger, '/map_save')
     
     def __init__(self, node, mqtt_client, response_topic, ros_topic_subscriber, version='1.0', robot_sn='', 
         server_url=None, perform_action_manager=None):
@@ -68,8 +72,6 @@ class PointCloudManager:
         self.point_cloud_persistor.set_upload_callback(self.upload_point_cloud_to_file_server)
         
         self.point_cloud_crop = PointCloudCrop()
-        # 点云保存服务客户端（只创建一次，避免 WaitSet 溢出）
-        self.map_save_client = self.node.create_client(Trigger, '/map_save')
 
         # 存储巡检任务的字典，key为taskId
         self.tasks: Dict[str, Dict] = {}

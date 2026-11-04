@@ -18,6 +18,7 @@ from task_dispatcher.ptz_control import PtzControl
 import threading
 import numpy as np
 from uav_command_sender import UavCommandSender
+from ros_client_cache import lazy_client
 
 # 配置日志
 logger = logging.getLogger('perform_action_manager')
@@ -26,6 +27,11 @@ class PerformActionManager:
     """
     执行动作管理器，负责处理各种巡检任务动作
     """
+
+    # ROS2 服务客户端（首次使用才注册，空闲时不占用节点实体）
+    algo_client = lazy_client(AlgoControl, '/algo_control')
+    move_client = lazy_client(Move, '/rkbot/move')
+    mode_client = lazy_client(SetCtrlMode, '/rkbot/setctrlmode')
     
     def __init__(self, node, ptz_controller=None, topic_subscriber=None, speed_topic_prefix=''):
         """
@@ -94,10 +100,6 @@ class PerformActionManager:
         self._mission_event_sub = self.node.create_subscription(
             String, "/mission_event", self._on_mission_event, 10)
 
-        # ROS2 服务客户端（只创建一次，避免 WaitSet 溢出）
-        self.algo_client = self.node.create_client(AlgoControl, '/algo_control')
-        self.move_client = self.node.create_client(Move, '/rkbot/move')
-        self.mode_client = self.node.create_client(SetCtrlMode, '/rkbot/setctrlmode')
 
         logger.info('执行动作管理器初始化完成')
     
