@@ -119,7 +119,7 @@ class VideoPreviewManager:
                 self.send_ack_response(message_data, 200, 'ok', {})
             else:
                 logger.error(f'启动视频流失败: cameraId={camera_id}')
-                self.send_ack_response(message_data, 500, f'启动视频流失败（{PREVIEW_FIRST_FRAME_TIMEOUT}s 内未出首帧）', {})
+                self.send_ack_response(message_data, 500, f'启动视频流失败（推流进程在 {PREVIEW_START_TIMEOUT}s 内退出，推流地址可能不可达）', {})
                 
         except Exception as e:
             logger.error(f'处理播放视频命令时出错: {str(e)}')
