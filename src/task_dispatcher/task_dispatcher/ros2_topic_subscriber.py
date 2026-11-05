@@ -29,7 +29,8 @@ import tf_transformations
 from action_msgs.msg import GoalStatusArray
 import requests  # 添加requests库用于HTTP请求
 from .config import FFR_SERVER_URL, ROBOT_TYPE  # 引入配置文件中的URL
-from .config import ATTITUDE_SAMPLE_PERIOD, BATTERY_SAMPLE_PERIOD  # 高频话题采样周期
+from .config import (ATTITUDE_SAMPLE_PERIOD, BATTERY_SAMPLE_PERIOD,
+                   LOCAL_POSITION_SAMPLE_PERIOD)  # 高频话题采样周期
 #from explore_lite.msg import ExploreStatus
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import BatteryStatus
@@ -376,11 +377,11 @@ class Ros2TopicSubscriber:
                 self._cb_device_global_pos, 
                 px4_qos_profile)
             
-            self.node.create_subscription(
-                VehicleLocalPosition, 
-                '/fmu/out/vehicle_local_position', 
-                self._cb_device_local_pos, 
-                px4_qos_profile)
+            # 本地位置按需采样（默认 10Hz）：最快消费方是 10Hz 的手动飞行链路，
+            # 状态上报 1Hz、起飞自检取一次；航点判定用的是 /pcl_pose，不依赖这个话题
+            self.local_position_sampler = self._make_sampler(
+                VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+                self._cb_device_local_pos, LOCAL_POSITION_SAMPLE_PERIOD, px4_qos_profile)
             
             # 姿态按需采样（默认 1s 一次）：只用于 1Hz 状态上报，控制与自检都不用它
             self.attitude_sampler = self._make_sampler(
