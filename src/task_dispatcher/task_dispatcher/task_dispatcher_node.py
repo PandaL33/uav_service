@@ -3,6 +3,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 import paho.mqtt.client as mqtt
 import json
 import logging
@@ -53,6 +54,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger('task_dispatcher')
 
+
+def disable_default_qos_event_callbacks(node):
+    """
+    去掉 rclpy 给每个发布/订阅默认注册的 QoS 事件处理器。
+
+    单线程 executor 每处理一条消息，都要用节点上的全部实体重建一次 WaitSet；这些
+    处理器默认只用来打印“对端 QoS 不兼容”告警，却实测占了重建集的一半以上
+    （58 个实体里 33 个是它），白白抬高 CPU。
+
+    代价：不再有该告警。QoS 配错的表现为“订阅在但话题 0Hz”，开 ENABLE_PERF_LOG
+    就能直接看出来。调用方显式传入 event_callbacks 时保持原样。
+    """
+    def wrap(method_name, factory):
+        original = getattr(node, method_name)
+
+        def wrapper(*args, **kwargs):
+            if kwargs.get('event_callbacks') is None:
+                kwargs['event_callbacks'] = factory()
+            return original(*args, **kwargs)
+
+        setattr(node, method_name, wrapper)
+
+    wrap('create_subscription',
+         lambda: SubscriptionEventCallbacks(use_default_callbacks=False))
+    wrap('create_publisher',
+         lambda: PublisherEventCallbacks(use_default_callbacks=False))
+
+
 class TaskDispatcherNode(Node):
     """
     任务派发节点，负责订阅MQTT消息并调用下游ROS服务
@@ -60,6 +89,9 @@ class TaskDispatcherNode(Node):
     
     def __init__(self):
         super().__init__('task_dispatcher_node')
+
+        # 降低 executor 每轮 WaitSet 重建成本：必须在任何发布/订阅创建之前
+        disable_default_qos_event_callbacks(self)
         
         # MQTT相关参数
         self.declare_parameter('mqtt_broker', 'localhost')
