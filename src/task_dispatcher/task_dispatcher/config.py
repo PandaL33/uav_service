@@ -64,13 +64,16 @@ PREVIEW_HW_DECODE = True
 
 # 高频飞控话题在本节点侧的采样周期（秒）：到点才订阅、收到一条就退订，
 # 用少量订阅创建开销换掉 executor 每消息一次的 WaitSet 重建（不动 PX4 侧发布频率）
-# 0 或负数 = 常驻订阅（最早的行为）；当前先按最早行为统计，故为 0
-ATTITUDE_SAMPLE_PERIOD = 0.0   # /fmu/out/vehicle_attitude：仅供 1Hz 状态上报使用
-BATTERY_SAMPLE_PERIOD = 0.0    # /fmu/out/battery_status：供上报与起飞自检取电量/电压
+# 0 或负数 = 常驻订阅（最早的行为）
+# 实测 CPU = 消息轮次 × 节点实体数（本轮次下每轮重建约 2.8ms、每实体约 47us），
+# 所以降低到达频率与降低实体数是乘性收益；采样建/销的代价约为此前实测的 1/200
+ATTITUDE_SAMPLE_PERIOD = 1.0          # /fmu/out/vehicle_attitude：仅供 1Hz 状态上报使用
+BATTERY_SAMPLE_PERIOD = 1.0           # /fmu/out/battery_status：供上报与起飞自检取电量/电压
+LOCAL_POSITION_SAMPLE_PERIOD = 0.1    # /fmu/out/vehicle_local_position：最快消费方为 10Hz
 
-# 是否禁用 rclpy 默认的 QoS 事件处理器（可把重建集从 58 降到 27）
-# False = 保留 rclpy 默认行为（最早的行为），当前用于对照统计
-DISABLE_QOS_EVENT_CALLBACKS = False
+# 是否禁用 rclpy 默认的 QoS 事件处理器：实测占重建集 33/59，禁用后约降到 27
+# 代价是不再打印“对端 QoS 不兼容”告警（可开 ENABLE_PERF_LOG 用 0Hz 反推）
+DISABLE_QOS_EVENT_CALLBACKS = True
 
 # 性能统计日志：默认关闭。需要现场排查 CPU 时改 True 并重启 task_dispatcher
 # 开启后会给 create_subscription 套一层计数包装，并周期性打印一行摘要
