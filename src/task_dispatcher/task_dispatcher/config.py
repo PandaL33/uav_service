@@ -62,6 +62,11 @@ PREVIEW_ACK_CONTINUE = 100     # 播放命令先回该状态码表示“受理�
 # 关闭或平台不支持时自动回退 CPU 软解；编码器同理（h264_rkmpp → libx264）
 PREVIEW_HW_DECODE = True
 
+# 性能统计日志：默认关闭。需要现场排查 CPU 时改 True 并重启 task_dispatcher
+# 开启后会给 create_subscription 套一层计数包装，并周期性打印一行摘要
+ENABLE_PERF_LOG = False
+PERF_LOG_INTERVAL = 60     # 摘要打印周期（秒）
+
 # 是否进行起飞前设备状态自检
 ENABLE_PREFLIGHT_CHECK = True
 

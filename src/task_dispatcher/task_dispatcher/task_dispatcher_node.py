@@ -29,6 +29,9 @@ from task_dispatcher.message_cache import message_cache_manager
 from task_dispatcher.ptz_control import PtzControl
 # 导入服务管理器
 from task_dispatcher.service_manager import handle_service_list_request, handle_service_control_request
+# 导入性能统计模块与开关
+from task_dispatcher.perf_monitor import PerfMonitor
+from task_dispatcher.config import ENABLE_PERF_LOG, PERF_LOG_INTERVAL
 # 导入初始化定位管理器
 from task_dispatcher.initial_pose_manager import InitialPoseManager
 # 导入执行动作管理器
@@ -93,12 +96,23 @@ class TaskDispatcherNode(Node):
         if self.mqtt_username and self.mqtt_password:
             self.mqtt_client.username_pw_set(self.mqtt_username, self.mqtt_password)
 
+        # 性能统计（默认关闭，见 config.ENABLE_PERF_LOG）
+        # 回调计数包装必须早于任何 create_subscription，所以放在各管理器之前
+        self.perf_monitor = None
+        if ENABLE_PERF_LOG:
+            self.perf_monitor = PerfMonitor(self, None, PERF_LOG_INTERVAL)
+            self.perf_monitor.install()
+
         # 初始化视频预览管理器
         self.video_preview_manager = VideoPreviewManager(
             node=self,
             mqtt_client=self.mqtt_client,
             response_topic=self.mqtt_response_topic
         )
+
+        if self.perf_monitor is not None:
+            self.perf_monitor.streams_owner = self.video_preview_manager
+            self.perf_monitor.start()
 
         # 初始化Ros2TopicSubscriber，用于订阅机器人状态和告警信息
         self.ros_topic_subscriber = Ros2TopicSubscriber(
