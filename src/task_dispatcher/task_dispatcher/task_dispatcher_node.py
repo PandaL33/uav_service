@@ -32,7 +32,8 @@ from task_dispatcher.ptz_control import PtzControl
 from task_dispatcher.service_manager import handle_service_list_request, handle_service_control_request
 # 导入性能统计模块与开关
 from task_dispatcher.perf_monitor import PerfMonitor
-from task_dispatcher.config import ENABLE_PERF_LOG, PERF_LOG_INTERVAL
+from task_dispatcher.config import ENABLE_PERF_LOG, PERF_LOG_INTERVAL, \
+    DISABLE_QOS_EVENT_CALLBACKS
 # 导入初始化定位管理器
 from task_dispatcher.initial_pose_manager import InitialPoseManager
 # 导入执行动作管理器
@@ -91,7 +92,8 @@ class TaskDispatcherNode(Node):
         super().__init__('task_dispatcher_node')
 
         # 降低 executor 每轮 WaitSet 重建成本：必须在任何发布/订阅创建之前
-        disable_default_qos_event_callbacks(self)
+        if DISABLE_QOS_EVENT_CALLBACKS:
+            disable_default_qos_event_callbacks(self)
         
         # MQTT相关参数
         self.declare_parameter('mqtt_broker', 'localhost')
@@ -710,8 +712,11 @@ def main(args=None):
         # 创建节点
         task_dispatcher_node = TaskDispatcherNode()
         
-        # 运行节点
-        rclpy.spin(task_dispatcher_node)
+        # 运行节点：开启性能统计时用带计时的 executor，
+        # 才能把「取消息(含反序列化)」和「回调计算」的耗时拆开
+        monitor = getattr(task_dispatcher_node, 'perf_monitor', None)
+        rclpy.spin(task_dispatcher_node,
+                   executor=monitor.create_executor() if monitor else None)
         
     except KeyboardInterrupt:
         logger.info('接收到中断信号，准备退出...')

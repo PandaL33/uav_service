@@ -64,9 +64,13 @@ PREVIEW_HW_DECODE = True
 
 # 高频飞控话题在本节点侧的采样周期（秒）：到点才订阅、收到一条就退订，
 # 用少量订阅创建开销换掉 executor 每消息一次的 WaitSet 重建（不动 PX4 侧发布频率）
-# 0 或负数 = 恢复常驻订阅的老行为
-ATTITUDE_SAMPLE_PERIOD = 1.0   # /fmu/out/vehicle_attitude：仅供 1Hz 状态上报使用
-BATTERY_SAMPLE_PERIOD = 5.0    # /fmu/out/battery_status：供上报与起飞自检取电量/电压
+# 0 或负数 = 常驻订阅（最早的行为）；当前先按最早行为统计，故为 0
+ATTITUDE_SAMPLE_PERIOD = 0.0   # /fmu/out/vehicle_attitude：仅供 1Hz 状态上报使用
+BATTERY_SAMPLE_PERIOD = 0.0    # /fmu/out/battery_status：供上报与起飞自检取电量/电压
+
+# 是否禁用 rclpy 默认的 QoS 事件处理器（可把重建集从 58 降到 27）
+# False = 保留 rclpy 默认行为（最早的行为），当前用于对照统计
+DISABLE_QOS_EVENT_CALLBACKS = False
 
 # 性能统计日志：默认关闭。需要现场排查 CPU 时改 True 并重启 task_dispatcher
 # 开启后会给 create_subscription 套一层计数包装，并周期性打印一行摘要
