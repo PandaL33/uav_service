@@ -62,6 +62,12 @@ PREVIEW_ACK_CONTINUE = 100     # 播放命令先回该状态码表示“受理�
 # 关闭或平台不支持时自动回退 CPU 软解；编码器同理（h264_rkmpp → libx264）
 PREVIEW_HW_DECODE = True
 
+# 高频飞控话题在本节点侧的采样周期（秒）：到点才订阅、收到一条就退订，
+# 用少量订阅创建开销换掉 executor 每消息一次的 WaitSet 重建（不动 PX4 侧发布频率）
+# 0 或负数 = 恢复常驻订阅的老行为
+ATTITUDE_SAMPLE_PERIOD = 1.0   # /fmu/out/vehicle_attitude：仅供 1Hz 状态上报使用
+BATTERY_SAMPLE_PERIOD = 5.0    # /fmu/out/battery_status：供上报与起飞自检取电量/电压
+
 # 性能统计日志：默认关闭。需要现场排查 CPU 时改 True 并重启 task_dispatcher
 # 开启后会给 create_subscription 套一层计数包装，并周期性打印一行摘要
 ENABLE_PERF_LOG = False
