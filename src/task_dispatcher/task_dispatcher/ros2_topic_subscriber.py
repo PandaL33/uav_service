@@ -29,6 +29,7 @@ import tf_transformations
 from action_msgs.msg import GoalStatusArray
 import requests  # 添加requests库用于HTTP请求
 from .config import FFR_SERVER_URL, ROBOT_TYPE  # 引入配置文件中的URL
+from .config import ATTITUDE_SAMPLE_PERIOD, BATTERY_SAMPLE_PERIOD  # 高频话题采样周期
 #from explore_lite.msg import ExploreStatus
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import BatteryStatus
@@ -42,6 +43,59 @@ from px4_msgs.msg import VehicleAttitude
 
 
 logger = logging.getLogger('task_dispatcher')
+
+
+class PeriodicSampler:
+    """
+    按需订阅：每个周期打开一次订阅，收到第一条数据立即退订，周期结束仍未收到也退订。
+
+    /fmu/out/battery_status 与 /fmu/out/vehicle_attitude 实际是 80~100Hz，但业务只用到
+    秒级新鲜度（1Hz 状态上报、起飞前取一次电量）。rclpy 单线程 executor 每收到一条消息
+    都要用节点全部实体重建一次 WaitSet，常驻订阅等于白付几十倍的重建成本。
+
+    订阅的创建与销毁都发生在 executor 线程内（定时器回调 / 数据回调），不跨线程销毁。
+    """
+
+    def __init__(self, node, msg_type, topic, callback, period, qos_profile):
+        self.node = node
+        self.msg_type = msg_type
+        self.topic = topic
+        self.callback = callback
+        self.period = float(period)
+        self.qos_profile = qos_profile
+        self._sub = None
+
+    def start(self):
+        # 先立刻采一次，再进入周期；避免刚启动就等满一个周期
+        self._open()
+        self.node.create_timer(self.period, self._open)
+
+    def _open(self):
+        # 先收口上一轮（可能一条都没收到），保证同一话题最多只有一个订阅
+        self.close()
+        self._sub = self.node.create_subscription(
+            self.msg_type, self.topic, self._on_msg, self.qos_profile)
+
+    def close(self):
+        sub, self._sub = self._sub, None
+        if sub is not None:
+            try:
+                self.node.destroy_subscription(sub)
+            except Exception as e:
+                logger.debug(f'关闭采样订阅失败 {self.topic}: {e}')
+
+    def _on_msg(self, msg):
+        # 先摘走引用，收到一条就够，随即退订到下个周期再开
+        sub, self._sub = self._sub, None
+        try:
+            self.callback(msg)
+        finally:
+            if sub is not None:
+                try:
+                    self.node.destroy_subscription(sub)
+                except Exception as e:
+                    logger.debug(f'采样后关闭订阅失败 {self.topic}: {e}')
+
 
 class Ros2TopicSubscriber:
     """
@@ -303,12 +357,10 @@ class Ros2TopicSubscriber:
                 px4_qos_profile
             )
 
-            self.node.create_subscription(
-                BatteryStatus,  # 假设battery_status使用BatteryStatus类型，包含JSON数据
-                '/fmu/out/battery_status',
-                self._battery_status_callback,
-                px4_qos_profile
-            )
+            # 电池状态按需采样（默认 5s 一次）：只用于上报与起飞前取电量/电压
+            self.battery_sampler = self._make_sampler(
+                BatteryStatus, '/fmu/out/battery_status',
+                self._battery_status_callback, BATTERY_SAMPLE_PERIOD, px4_qos_profile)
             
             # 订阅故障状态
             self.failsafe_flags_sub = self.node.create_subscription(
@@ -330,11 +382,10 @@ class Ros2TopicSubscriber:
                 self._cb_device_local_pos, 
                 px4_qos_profile)
             
-            self.node.create_subscription(
-                VehicleAttitude,
-                '/fmu/out/vehicle_attitude', 
-                self._cb_device_attitude,
-                px4_qos_profile)
+            # 姿态按需采样（默认 1s 一次）：只用于 1Hz 状态上报，控制与自检都不用它
+            self.attitude_sampler = self._make_sampler(
+                VehicleAttitude, '/fmu/out/vehicle_attitude',
+                self._cb_device_attitude, ATTITUDE_SAMPLE_PERIOD, px4_qos_profile)
 
             pcl_qos = QoSProfile(
                 reliability=ReliabilityPolicy.RELIABLE,
@@ -349,8 +400,33 @@ class Ros2TopicSubscriber:
                 pcl_qos
             )
             
+            # 1Hz 汇总上报：取代原先三个高频回调各自去撞 update_status 的 1s 闸门
+            if self._enable_status_report and self._device_status_report:
+                self.node.create_timer(1.0, self._publish_device_status)
+
         except Exception as e:
             logger.error(f'创建无人机订阅者失败: {e}')
+
+    def _make_sampler(self, msg_type, topic, callback, period, qos_profile):
+        """period>0 用按需采样，否则退回常驻订阅"""
+        if period and period > 0:
+            sampler = PeriodicSampler(self.node, msg_type, topic, callback, period, qos_profile)
+            sampler.start()
+            logger.info(f'{topic} 改为按需采样，周期 {period:g}s')
+            return sampler
+        self.node.create_subscription(msg_type, topic, callback, qos_profile)
+        return None
+
+    def _publish_device_status(self):
+        """汇总姿态/位置后交给 DeviceStatusReport（内部仍按 min_interval 节流）"""
+        try:
+            state = self.get_device_attitude_status()
+            state.update(self.get_device_local_position_status())
+            state.update(self.get_device_global_position_status())
+            state['position'] = self.get_position()
+            self._device_status_report.update_status(state)
+        except Exception as e:
+            logger.error(f'设备状态上报失败: {e}')
 
     def get_vehicle_status(self):
         with self._lock:
@@ -387,12 +463,7 @@ class Ros2TopicSubscriber:
                 self._device_state["global_position"]["altitude_amsl"] = round(float(msg.alt), 3)
                 
                 # logger.info(f"无人机定位信息:经度:{msg.lat}, 维度:{msg.lon},高度:{msg.alt}")
-                
-                # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
-                if self._enable_status_report and self._device_status_report:
-                    dev_global = self.get_device_global_position_status()
-                    dev_global['position'] = self.get_position()
-                    self._device_status_report.update_status(dev_global)
+                # 上报统一由 1Hz 定时器 _publish_device_status 触发，回调只写缓存
         except Exception as e:
             logger.error(f'处理无人机状态消息时出错: {e}')
 
@@ -410,12 +481,7 @@ class Ros2TopicSubscriber:
                 self._device_state["local_position"]["velocity_vertical"] = round(float(-vz), 3)
                 
                 # logger.info(f"无人机本地相对位置:相对高度:{-msg.z}, 水平速度:{math.sqrt(vx**2 + vy**2)},垂直速度:{-vz}")
-                
-                # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
-                if self._enable_status_report and self._device_status_report:
-                    dev_local = self.get_device_local_position_status()
-                    dev_local['position'] = self.get_position()
-                    self._device_status_report.update_status(dev_local)
+                # 上报统一由 1Hz 定时器 _publish_device_status 触发，回调只写缓存
                     
         except Exception as e:
             logger.error(f'处理无人机状态消息时出错: {e}')
@@ -464,11 +530,7 @@ class Ros2TopicSubscriber:
             self._device_state["attitude"]["yaw_deg"] = round(math.degrees(yaw),3)
             
             # logger.info(f"无人机角度信息:rool:{math.degrees(roll)}, pitch:{math.degrees(pitch)}, yaw:{math.degrees(yaw)}")
-            # 如果启用了状态上报，更新状态（附上本机坐标，供 DeviceStatusReport 上报）
-            if self._enable_status_report and self._device_status_report:
-                dev_att = self.get_device_attitude_status()
-                dev_att['position'] = self.get_position()
-                self._device_status_report.update_status(dev_att)
+            # 上报统一由 1Hz 定时器 _publish_device_status 触发，回调只写缓存
 
         except AttributeError as e:
             # 如果连 msg.q 都没有，那可能是消息定义完全不同，打印可用属性调试
