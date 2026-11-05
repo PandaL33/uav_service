@@ -15,6 +15,8 @@ import logging
 import os
 import time
 
+from rclpy.executors import SingleThreadedExecutor
+
 logger = logging.getLogger('perf_monitor')
 
 _CLK_TCK = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
@@ -52,6 +54,34 @@ def _thread_count():
         return 0
 
 
+class PerfExecutor(SingleThreadedExecutor):
+    """
+    只加计时的单线程 executor：把「取消息（含 rmw 取数据 + C→Python 反序列化）」
+    和「回调计算」分开统计。
+
+    行为与 SingleThreadedExecutor 完全一致，不加任何逻辑分支。
+    """
+
+    def __init__(self, monitor):
+        super().__init__()
+        self._monitor = monitor
+
+    def _take_subscription(self, sub):
+        started = time.perf_counter()
+        try:
+            return super()._take_subscription(sub)
+        finally:
+            self._monitor.record_take(getattr(sub, 'perf_topic', None) or '?',
+                                      time.perf_counter() - started)
+
+    def wait_for_ready_callbacks(self, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return super().wait_for_ready_callbacks(*args, **kwargs)
+        finally:
+            self._monitor.record_wait(time.perf_counter() - started)
+
+
 class PerfMonitor:
     """
     订阅回调计数 + 周期性性能摘要。
@@ -76,27 +106,54 @@ class PerfMonitor:
         self._prev_entities = None
         self._child_cpu = {}
         self._timer = None
+        # executor 轮次与「等待+重建」耗时（wall，含阻塞等待）
+        self._wait_n = 0
+        self._wait_ms = 0.0
 
     # ---------- 订阅计数 ----------
     def install(self):
-        """包装 node.create_subscription，为每个话题统计调用次数与累计回调耗时"""
+        """包装 node.create_subscription，为每个话题统计回调次数与回调耗时"""
         original = self.node.create_subscription
 
         def create_subscription(msg_type, topic, callback, qos_profile=10, *args, **kwargs):
-            entry = self._stats.setdefault(topic, {'count': 0, 'ms': 0.0})
+            entry = self._entry(topic)
 
             def counted(msg, _cb=callback, _entry=entry):
                 started = time.perf_counter()
                 try:
                     return _cb(msg)
                 finally:
-                    _entry['count'] += 1
-                    _entry['ms'] += (time.perf_counter() - started) * 1000.0
+                    _entry['cb_n'] += 1
+                    _entry['cb_ms'] += (time.perf_counter() - started) * 1000.0
 
-            return original(msg_type, topic, counted, qos_profile, *args, **kwargs)
+            sub = original(msg_type, topic, counted, qos_profile, *args, **kwargs)
+            try:
+                sub.perf_topic = topic      # 供 executor 侧把 take 归到同一话题
+            except (AttributeError, TypeError):
+                pass
+            return sub
 
         self.node.create_subscription = create_subscription
         logger.info(f'性能统计已开启，周期 {self.interval:g}s（回调包装已安装）')
+
+    def _entry(self, topic):
+        return self._stats.setdefault(topic, {'cb_n': 0, 'cb_ms': 0.0,
+                                              'take_n': 0, 'take_ms': 0.0})
+
+    def record_take(self, topic, seconds):
+        """executor 取消息（含 C→Python 反序列化）耗时"""
+        entry = self._entry(topic)
+        entry['take_n'] += 1
+        entry['take_ms'] += seconds * 1000.0
+
+    def record_wait(self, seconds):
+        """一轮 wait_for_ready_callbacks 的墙钟时间（含阻塞等待与 WaitSet 重建）"""
+        self._wait_n += 1
+        self._wait_ms += seconds * 1000.0
+
+    def create_executor(self):
+        """返回带计时的 executor，交给 rclpy.spin(node, executor=...) 使用"""
+        return PerfExecutor(self)
 
     # ---------- 实体数 ----------
     def _count(self, attr):
@@ -182,24 +239,41 @@ class PerfMonitor:
                            f'{self._prev_entities} -> {entities["total"]} {entities}')
         self._prev_entities = entities['total']
 
-        total_count = 0
-        total_ms = 0.0
+        # 分项统计：取消息（executor 侧，含 rmw 取数据与 C→Python 反序列化）
+        # 与回调计算（用户代码）分开；其余 = 进程总 CPU − 这两项（含其它线程）
+        total_cb_n = 0
+        total_cb_ms = 0.0
+        total_take_ms = 0.0
         rows = []
         for topic, entry in self._stats.items():
-            total_count += entry['count']
-            total_ms += entry['ms']
-            rows.append((entry['count'] / window, entry['ms'] / window, topic))
-            entry['count'] = 0
-            entry['ms'] = 0.0
+            total_cb_n += entry['cb_n']
+            total_cb_ms += entry['cb_ms']
+            total_take_ms += entry['take_ms']
+            rows.append(((entry['take_ms'] + entry['cb_ms']) / window,
+                         entry['cb_n'] / window, entry['take_ms'] / window,
+                         entry['cb_ms'] / window, topic))
+            entry['cb_n'] = entry['take_n'] = 0
+            entry['cb_ms'] = entry['take_ms'] = 0.0
         rows.sort(reverse=True)
-        top = '; '.join(f'{topic} {hz:.1f}Hz {ms:.2f}ms/s' for hz, ms, topic in rows[:self.top_n])
+        top = '; '.join(f'{topic} {hz:.1f}Hz take={t:.2f} cb={c:.2f}ms/s'
+                        for _, hz, t, c, topic in rows[:self.top_n])
 
+        wait_n = self._wait_n
+        wait_ms = self._wait_ms
+        self._wait_n, self._wait_ms = 0, 0.0
+
+        cpu_ms = cpu_pct * 10.0                      # %单核 → ms/s
+        cb_ms = total_cb_ms / window
+        take_ms = total_take_ms / window
         logger.info(
-            f'[PERF] cpu={cpu_pct:.1f}%单核 rss={_proc_rss_mb():.0f}MB 线程={_thread_count()} '
+            f'[PERF] cpu={cpu_pct:.1f}%单核({cpu_ms:.0f}ms/s) rss={_proc_rss_mb():.0f}MB '
+            f'线程={_thread_count()} '
             f'| 实体 sub={entities["sub"]} waitable={entities["waitable"]} '
             f'timer={entities["timer"]} client={entities["client"]} '
             f'srv={entities["srv"]} guard={entities["guard"]} 重建集={entities["total"]} '
-            f'| 消息={total_count / window:.1f}/s 回调={total_ms / window:.2f}ms/s '
+            f'| 消息={total_cb_n / window:.1f}/s 轮次={wait_n / window:.1f}/s '
+            f'| 拆分(ms/s): take={take_ms:.1f} 回调={cb_ms:.1f} '
+            f'其余={cpu_ms - take_ms - cb_ms:.1f} 等待墙钟={wait_ms / window:.0f} '
             f'| Top: {top or "无"}{self._stream_lines()}'
         )
         self._prev_at = now
