@@ -11,6 +11,9 @@ Environment=RTMP_URL=rtmp://wrjxk.app.xmschain.com:1935/UAV/UAV00003/19yqM1eMpAV
 Environment=MODE=auto
 Environment=SRC_CODEC=hevc
 Environment=RTSP_TRANSPORT=tcp
+# 守护: 30s 打一次心跳; 连续 90s 没有数据写出判定卡死, 退出后由 Restart 重启
+Environment=WATCHDOG_SEC=30
+Environment=STALL_SEC=90
 ExecStart=/usr/local/bin/rtmp_relay.sh
 Restart=always
 RestartSec=5

@@ -14,6 +14,9 @@ GOP="${GOP:-50}"                                 # 关键帧间隔
 RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}"          # tcp 更稳, 交换机/NAT 下建议 tcp
 RTSP_TIMEOUT_US="${RTSP_TIMEOUT_US:-15000000}"   # 15s 无数据则退出, 交给 systemd 重启
 RTSP_TIMEOUT_OPT="${RTSP_TIMEOUT_OPT:-auto}"     # auto 按 ffmpeg 版本选 rw_timeout/stimeout/timeout
+FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-warning}"    # 排查问题可设 info/verbose
+WATCHDOG_SEC="${WATCHDOG_SEC:-30}"               # 心跳/检查间隔(秒), 0=关闭守护
+STALL_SEC="${STALL_SEC:-90}"                     # 连续无数据写出多少秒判定卡死
 LOG_TAG="${LOG_TAG:-rtmp-relay}"
 FFMPEG="${FFMPEG:-ffmpeg}"
 
@@ -151,6 +154,144 @@ _gst_nvenc() {
     gst-inspect-1.0 nvv4l2h264enc >/dev/null 2>&1
 }
 
+# ---------------- 进程守护与状态日志 ----------------
+# 推流停止时往往没有任何报错(对端断开/RTSP 静默中断), 这里靠 RTMP 连接的发送字节判断卡死
+_child_pid=""
+_ts() { date '+%F %T'; }
+
+# 从 URL 取端口(取不到用默认值)
+_url_port() {
+  local hp="${1#*://}"
+  hp="${hp%%/*}"
+  case "$hp" in *:*) printf '%s' "${hp##*:}" ;; *) printf '%s' "$2" ;; esac
+}
+_RTMP_PORT="$(_url_port "$RTMP_URL" 1935)"
+_RTSP_PORT="$(_url_port "$RTSP_URL" 554)"
+
+# 统计进程到指定端口那条 TCP 连接: 输出 "peer|sendq|sent|acked|recv", 取不到返回 1。
+# 注意: /proc/<pid>/io 的 wchar 只统计文件写, 不含 socket send, 不能用它判断推流是否还在动。
+_sock_stats() {
+  local pid="$1" port="$2" inos
+  inos="$(ls -l "/proc/$pid/fd" 2>/dev/null | sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p' | paste -sd'|')"
+  [ -n "$inos" ] || return 1
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -tinpe 2>/dev/null | awk -v ino="$inos" -v port="$port" '
+    function val(s, pat,   r) {
+      if (!match(s, pat)) return 0
+      r = substr(s, RSTART, RLENGTH); sub(/^[^:]*:/, "", r); return r + 0
+    }
+    function flush() {
+      if (blk != "" && blk ~ ("ino:(" ino ")") && blk ~ (":" port "([^0-9]|$)")) {
+        peers = peers (peers == "" ? "" : ",") peer
+        sendq += sndq
+        sent  += val(blk, "bytes_sent:[0-9]+")
+        acked += val(blk, "bytes_acked:[0-9]+")
+        recv  += val(blk, "bytes_received:[0-9]+")
+        found++
+      }
+      blk = ""
+    }
+    /^State[[:space:]]/ { next }
+    /^[A-Z][A-Z-]*[[:space:]]/ { flush(); peer = $5; sndq = $3 + 0; blk = $0; next }
+    { blk = blk "\n" $0 }
+    END { flush(); if (found) printf "%s|%d|%d|%d|%d\n", peers, sendq, sent, acked, recv; else exit 1 }'
+}
+
+trap '_stop_child; echo "[$LOG_TAG] $(_ts) 收到终止信号, 已停止" >&2; exit 0' TERM INT
+
+_stop_child() {
+  [ -n "$_child_pid" ] || return 0
+  kill -TERM "$_child_pid" 2>/dev/null
+  sleep 2
+  kill -KILL "$_child_pid" 2>/dev/null
+  wait "$_child_pid" 2>/dev/null
+  _child_pid=""
+}
+
+run_supervised() {
+  [ "$WATCHDOG_SEC" -gt 0 ] || { "$@"; return $?; }
+
+  local pid start now last_change rc idle measured=0
+  local rt src rp rsq rsent rack rrecv sp ssq ssent sack srecv
+  local acked_prev="" src_prev="" out_delta in_delta has_src=0
+
+  echo "[$LOG_TAG] $(_ts) 启动: $*"
+
+  "$@" &
+  pid=$!
+  _child_pid=$pid
+  start=$(date +%s)
+  last_change=$start
+
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$WATCHDOG_SEC"
+    kill -0 "$pid" 2>/dev/null || break
+    now=$(date +%s)
+    idle=$((now - last_change))
+
+    rt="$(_sock_stats "$pid" "$_RTMP_PORT")" || rt=""
+    src="$(_sock_stats "$pid" "$_RTSP_PORT")" || src=""
+
+    # 拉流端(摄像机)收到的字节, 用于区分是摄像机没数据还是推流端没发出去。
+    # 仅对 RTSP over TCP 有意义; UDP 传输时这条连接只有控制消息
+    if [ -n "$src" ]; then
+      IFS='|' read -r sp ssq ssent sack srecv <<< "$src"
+      in_delta=$((srecv - ${src_prev:-$srecv}))
+      src_prev=$srecv
+      has_src=1
+    else
+      sp="-"; in_delta=0; has_src=0
+    fi
+
+    if [ -z "$rt" ]; then
+      if [ "$measured" -eq 0 ]; then
+        # 尚未观测到推流连接(启动初期或缺少 ss), 不做判断
+        echo "[$LOG_TAG] $(_ts) 提示: 运行 $((now - start))s, 未找到推流 TCP 连接, 暂不判断卡死" >&2
+      elif [ "$idle" -ge "$STALL_SEC" ]; then
+        echo "[$LOG_TAG] $(_ts) 错误: 推流连接已断开 ${idle}s (拉流 $sp 本轮收到 ${in_delta}B), 重启进程" >&2
+        _stop_child
+        return 7
+      else
+        echo "[$LOG_TAG] $(_ts) 警告: 推流连接不存在 (${idle}s 无数据, 运行 $((now - start))s, 拉流 $sp 本轮收到 ${in_delta}B)" >&2
+      fi
+      continue
+    fi
+
+    IFS='|' read -r rp rsq rsent rack rrecv <<< "$rt"
+    measured=1
+    [ "${rack:-0}" -eq 0 ] && rack=$rsent
+    out_delta=${acked_prev:+$((rack - acked_prev))}
+
+    if [ -z "$acked_prev" ] || [ "${out_delta:-0}" -gt 0 ] || [ "$rack" -gt "$acked_prev" ]; then
+      last_change=$now
+      echo "[$LOG_TAG] $(_ts) 心跳: 运行 $((now - start))s, 推流 $rp 已发 ${rack}B${out_delta:+(本轮 +${out_delta}B)} 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B"
+    else
+      echo "[$LOG_TAG] $(_ts) 警告: ${idle}s 无数据发出, 推流 $rp 已发 ${rack}B 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B" >&2
+      if [ "$rsq" -gt 0 ]; then
+        echo "[$LOG_TAG] $(_ts) 诊断: 数据积压在内核发送缓冲(待发 ${rsq}B), 对端没有接收" >&2
+      elif [ "$has_src" -eq 0 ]; then
+        echo "[$LOG_TAG] $(_ts) 诊断: 未找到拉流连接($sp), 无法判断摄像机侧是否有数据" >&2
+      elif [ "$in_delta" -eq 0 ]; then
+        echo "[$LOG_TAG] $(_ts) 诊断: 摄像机侧也没有新数据到达, 问题在拉流端(RTSP)" >&2
+      else
+        echo "[$LOG_TAG] $(_ts) 诊断: 拉流正常但编码/推流没有输出, 问题在本地编码或 rtmpsink" >&2
+      fi
+      if [ "$idle" -ge "$STALL_SEC" ]; then
+        echo "[$LOG_TAG] $(_ts) 错误: 连续 ${idle}s 无数据发出, 判定推流已中断, 重启进程" >&2
+        _stop_child
+        return 7
+      fi
+    fi
+    acked_prev=$rack
+  done
+
+  wait "$pid"
+  rc=$?
+  _child_pid=""
+  echo "[$LOG_TAG] $(_ts) 推流进程退出: 退出码 $rc, 运行 $(( $(date +%s) - start ))s" >&2
+  return "$rc"
+}
+
 # MODE=auto: ffmpeg 自带 NVENC 就用它; 否则 Jetson 上改走 GStreamer(nvv4l2) 硬解硬编
 if [ "$MODE" = auto ]; then
   if _has "$encoders" h264_nvv4l2enc; then
@@ -170,12 +311,14 @@ if [ "$MODE" = gst ]; then
     *)    depay=rtph265depay; parser=h265parse ;;
   esac
   echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (gst: nvv4l2decoder + nvv4l2h264enc ${VIDEO_KBPS}kbps)"
-  exec gst-launch-1.0 -e \
+  export GST_DEBUG="${GST_DEBUG:-2}" GST_DEBUG_NO_COLOR=1
+  run_supervised gst-launch-1.0 -e \
     rtspsrc location="$RTSP_URL" protocols="$RTSP_TRANSPORT" latency=100 \
     ! "$depay" ! "$parser" ! nvv4l2decoder ! nvvidconv \
     ! 'video/x-raw(memory:NVMM),format=NV12' \
     ! nvv4l2h264enc bitrate="$((VIDEO_KBPS * 1000))" iframeinterval="$GOP" \
     ! h264parse ! flvmux streamable=true ! rtmpsink location="$RTMP_URL"
+  exit $?
 fi
 
 # ---------------- ffmpeg 路径 ----------------
@@ -245,7 +388,7 @@ esac
 
 # ---------------- 输入选项 ----------------
 input=(
-  -hide_banner -loglevel warning -nostats
+  -hide_banner -loglevel "$FFMPEG_LOGLEVEL" -nostats
   -rtsp_transport "$RTSP_TRANSPORT"
   "${timeout_args[@]}"
   "${dec_args[@]}"
@@ -260,4 +403,5 @@ output=(
 )
 
 echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (mode=$MODE, 解码=$dec_name, 编码=$enc_name, transport=$RTSP_TRANSPORT)"
-exec "$FFMPEG" "${input[@]}" "${enc[@]}" "${output[@]}"
+run_supervised "$FFMPEG" "${input[@]}" "${enc[@]}" "${output[@]}"
+exit $?
