@@ -783,6 +783,34 @@ class CruiseUavTaskManager:
             time.sleep(0.2)
         return False, f'PX4 nav_state 未在 {timeout}s 内进入 OFFBOARD'
 
+    def _wait_preflight_checks(self, timeout: float = 30.0, poll_interval: float = 0.5,
+                               log_interval: float = 5.0) -> Tuple[bool, str]:
+        """等待 PX4 的 pre_flight_checks_pass 变为 True。
+
+        刚切入 OFFBOARD 时，PX4 侧的航向估计（heading_good_for_control）与 offboard
+        信号有效位需要几个控制周期才收敛，此时 pre_flight_checks_pass 仍为 False；
+        不带等待地做一次快照会把这种瞬态误判成起飞失败。超时返回最后的阻塞原因。
+        """
+        start_time = time.time()
+        deadline = start_time + max(1.0, float(timeout))
+        last_log_time = 0.0
+        detail = '未收到 vehicle_status'
+        logger.info(f'等待 PX4 预飞行检查通过（最长 {timeout}s）...')
+        while time.time() < deadline and rclpy.ok():
+            status = self.ros_topic_subscriber.get_vehicle_status()
+            if status is not None and status.pre_flight_checks_pass:
+                logger.info(f'PX4 预飞行检查已通过，耗时 {time.time() - start_time:.1f}s')
+                return True, ''
+            if status is not None and time.time() - last_log_time >= log_interval:
+                last_log_time = time.time()
+                detail = self.preflight_check_node.check_sensor_health().get('message', detail)
+                logger.info(f'预飞行检查仍未通过，继续等待: {detail}')
+            time.sleep(poll_interval)
+        if not rclpy.ok():
+            return False, '节点已退出'
+        logger.warning(f'PX4 预飞行检查在 {timeout}s 内未通过: {detail}')
+        return False, detail
+
     def _abort_before_takeoff(self, task_id: str, msg: str):
         """起飞前失败统一收尾：停导航服务 → 机库回滚 → 上报并复位。
 
@@ -1418,6 +1446,12 @@ class CruiseUavTaskManager:
 
                 # 起飞前状态检测（此时模式已是 OFFBOARD，自检反映真实起飞条件）
                 if ENABLE_PREFLIGHT_CHECK:
+                    # 刚切 OFFBOARD 时航向估计/offboard 信号有效位尚未收敛，
+                    # 先等待 PX4 预飞行检查就绪，再按快照判定，避免瞬态误判
+                    ready, wait_msg = self._wait_preflight_checks()
+                    if not ready:
+                        self._abort_before_takeoff(task_id, f'预飞行检查未通过: {wait_msg}')
+                        return
                     check_code, report = self.preflight_check_node._start_check()
                     if check_code == 1:
                         # report 是结构化列表，取中文详情串便于日志与平台上报

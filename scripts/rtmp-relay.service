@@ -1,0 +1,18 @@
+[Unit]
+Description=Sangluwoo 摄像机 RTSP -> RTMP 转发
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 摄像机 IP 由脚本按 MAC 自动探测; 需要固定时再设置 CAM_IP
+Environment=CAM_MAC=00:9A:7A:45:00:D7
+Environment=RTMP_URL=rtmp://wrjxk.app.xmschain.com:1935/UAV/UAV00003/19yqM1eMpAVLSpD2S6Ej
+Environment=MODE=copy
+Environment=RTSP_TRANSPORT=tcp
+ExecStart=/usr/local/bin/rtmp_relay.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
