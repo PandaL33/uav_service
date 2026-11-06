@@ -6,10 +6,14 @@ set -uo pipefail
 
 # ---------------- 配置 (可被环境变量覆盖) ----------------
 RTSP_URL="${RTSP_URL:-}"                         # 显式给出则直接使用, 跳过 IP 探测
-RTMP_URL="${RTMP_URL:-}"                         # 必填: rtmp://服务器/app/直播码
-MODE="${MODE:-copy}"                             # copy=直转低CPU | h264=转码兼容性好
+RTMP_URL="${RTMP_URL:-rtmp://wrjxk.app.xmschain.com:1935/UAV/UAV00003/19yqM1eMpAVLSpD2S6Ej}"  # 推流地址
+MODE="${MODE:-auto}"                             # auto | gst | h264 | copy
+SRC_CODEC="${SRC_CODEC:-hevc}"                   # 摄像机源码流编码: hevc | h264, 用于选硬解器/解包器
+VIDEO_KBPS="${VIDEO_KBPS:-2000}"                 # 转码码率 (kbps)
+GOP="${GOP:-50}"                                 # 关键帧间隔
 RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}"          # tcp 更稳, 交换机/NAT 下建议 tcp
 RTSP_TIMEOUT_US="${RTSP_TIMEOUT_US:-15000000}"   # 15s 无数据则退出, 交给 systemd 重启
+RTSP_TIMEOUT_OPT="${RTSP_TIMEOUT_OPT:-auto}"     # auto 按 ffmpeg 版本选 rw_timeout/stimeout/timeout
 LOG_TAG="${LOG_TAG:-rtmp-relay}"
 FFMPEG="${FFMPEG:-ffmpeg}"
 
@@ -136,35 +140,117 @@ if [ -z "$RTSP_URL" ]; then
   echo "[$LOG_TAG] 摄像机 $CAM_MAC -> $CAM_IP"
 fi
 
+# ---------------- 编解码能力探测 ----------------
+encoders="$("$FFMPEG" -hide_banner -encoders 2>/dev/null)"
+decoders="$("$FFMPEG" -hide_banner -decoders 2>/dev/null)"
+_has() { printf '%s\n' "$1" | grep -qE "[[:space:]]$2[[:space:]]"; }
+_is_jetson() { [ -e /etc/nv_tegra_release ] || [ -e /dev/nvhost-msenc ]; }
+_gst_nvenc() {
+  command -v gst-launch-1.0 >/dev/null 2>&1 &&
+    command -v gst-inspect-1.0 >/dev/null 2>&1 &&
+    gst-inspect-1.0 nvv4l2h264enc >/dev/null 2>&1
+}
+
+# MODE=auto: ffmpeg 自带 NVENC 就用它; 否则 Jetson 上改走 GStreamer(nvv4l2) 硬解硬编
+if [ "$MODE" = auto ]; then
+  if _has "$encoders" h264_nvv4l2enc; then
+    MODE=h264
+  elif _is_jetson && _gst_nvenc; then
+    MODE=gst
+  else
+    MODE=h264
+  fi
+fi
+
+# ---------------- GStreamer 路径 (Jetson: NVDEC 解码 + NVENC 编码) ----------------
+if [ "$MODE" = gst ]; then
+  _gst_nvenc || { echo "[$LOG_TAG] 错误: 缺少 gst-launch-1.0 或 nvv4l2h264enc 插件" >&2; exit 6; }
+  case "$SRC_CODEC" in
+    h264) depay=rtph264depay; parser=h264parse ;;
+    *)    depay=rtph265depay; parser=h265parse ;;
+  esac
+  echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (gst: nvv4l2decoder + nvv4l2h264enc ${VIDEO_KBPS}kbps)"
+  exec gst-launch-1.0 -e \
+    rtspsrc location="$RTSP_URL" protocols="$RTSP_TRANSPORT" latency=100 \
+    ! "$depay" ! "$parser" ! nvv4l2decoder ! nvvidconv \
+    ! 'video/x-raw(memory:NVMM),format=NV12' \
+    ! nvv4l2h264enc bitrate="$((VIDEO_KBPS * 1000))" iframeinterval="$GOP" \
+    ! h264parse ! flvmux streamable=true ! rtmpsink location="$RTMP_URL"
+fi
+
+# ---------------- ffmpeg 路径 ----------------
+# 不同 ffmpeg 版本对 RTSP 超时选项的命名不同(老版本只有 stimeout), 不支持则不加
+_rtsp_timeout_opt() {
+  local help opt
+  case "$RTSP_TIMEOUT_OPT" in
+    auto)
+      help="$("$FFMPEG" -hide_banner -h demuxer=rtsp 2>/dev/null)"
+      for opt in rw_timeout stimeout timeout; do
+        if printf '%s\n' "$help" | grep -qE "^[[:space:]]*-${opt}[[:space:]]"; then
+          printf '%s' "$opt"
+          return 0
+        fi
+      done
+      return 0
+      ;;
+    none) return 0 ;;
+    *) printf '%s' "$RTSP_TIMEOUT_OPT" ;;
+  esac
+}
+
+timeout_opt="$(_rtsp_timeout_opt)"
+timeout_args=()
+[ -n "$timeout_opt" ] && timeout_args=(-"$timeout_opt" "$RTSP_TIMEOUT_US")
+
+dec_args=(); dec_name="auto"
+enc=(); enc_name="copy"
+
+case "$MODE" in
+  copy)
+    # 不转码, CPU 最低。仅当摄像机输出 H.264 时可用; 源为 HEVC/H.265 时 FLV 不支持, 会报
+    # "Video codec hevc not compatible with flv", 请用 MODE=h264。
+    enc=(-c:v copy -c:a copy -fflags +genpts)
+    ;;
+  h264)
+    # 硬解: 可用则显式指定解码器, 否则交给 ffmpeg 自动选择
+    if _has "$decoders" "${SRC_CODEC}_nvv4l2dec"; then
+      dec_args=(-c:v "${SRC_CODEC}_nvv4l2dec")
+      dec_name="${SRC_CODEC}_nvv4l2dec"
+    fi
+
+    # 硬编优先: Jetson NVENC -> RK3588 V4L2 (Jetson 上 V4L2 无可用设备, 跳过) -> libx264
+    if _has "$encoders" h264_nvv4l2enc; then
+      enc_name=h264_nvv4l2enc
+    elif _has "$encoders" h264_v4l2m2m && ! _is_jetson; then
+      enc_name=h264_v4l2m2m
+    elif _has "$encoders" libx264; then
+      enc_name=libx264
+    else
+      echo "[$LOG_TAG] 错误: 当前 ffmpeg 没有可用的 H.264 编码器 (可用 MODE=gst 走 NVENC)" >&2
+      exit 5
+    fi
+
+    if [ "$enc_name" = libx264 ]; then
+      enc=(-c:v libx264 -preset ultrafast -tune zerolatency -b:v "${VIDEO_KBPS}k" -g "$GOP"
+           -c:a aac -ar 44100 -ac 1 -b:a 64k)
+    else
+      enc=(-c:v "$enc_name" -b:v "${VIDEO_KBPS}k" -g "$GOP" -c:a aac -ar 44100 -ac 1 -b:a 64k)
+    fi
+    ;;
+  *)
+    echo "[$LOG_TAG] 未知 MODE=$MODE (应为 auto/gst/h264/copy)" >&2
+    exit 2
+    ;;
+esac
+
 # ---------------- 输入选项 ----------------
 input=(
   -hide_banner -loglevel warning -nostats
   -rtsp_transport "$RTSP_TRANSPORT"
-  -rw_timeout "$RTSP_TIMEOUT_US"
+  "${timeout_args[@]}"
+  "${dec_args[@]}"
   -i "$RTSP_URL"
 )
-
-# ---------------- 编解码选项 ----------------
-case "$MODE" in
-  copy)
-    # 不转码, CPU 最低。要求 RTMP 服务器支持 MPEG-4 Part 2 视频编码。
-    # 大多数云直播(阿里云/腾讯云/抖音)只认 H.264, 那种场景请用 MODE=h264。
-    enc=(-c:v copy -c:a copy -fflags +genpts)
-    ;;
-  h264)
-    # RK3588 优先用硬件编码器 h264_v4l2m2m, 缺失则回退 libx264 ultrafast。
-    if "$FFMPEG" -hide_banner -encoders 2>/dev/null | grep -q 'h264_v4l2m2m'; then
-      enc=(-c:v h264_v4l2m2m -b:v 2000k -g 50 -c:a aac -ar 44100 -ac 1 -b:a 64k)
-    else
-      enc=(-c:v libx264 -preset ultrafast -tune zerolatency -b:v 2000k -g 50
-           -c:a aac -ar 44100 -ac 1 -b:a 64k)
-    fi
-    ;;
-  *)
-    echo "[$LOG_TAG] 未知 MODE=$MODE (应为 copy 或 h264)" >&2
-    exit 2
-    ;;
-esac
 
 # ---------------- 输出 ----------------
 output=(
@@ -173,5 +259,5 @@ output=(
   "$RTMP_URL"
 )
 
-echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (mode=$MODE, transport=$RTSP_TRANSPORT)"
+echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (mode=$MODE, 解码=$dec_name, 编码=$enc_name, transport=$RTSP_TRANSPORT)"
 exec "$FFMPEG" "${input[@]}" "${enc[@]}" "${output[@]}"
