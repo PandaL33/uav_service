@@ -206,6 +206,13 @@ class CruiseUavTaskManager:
             data = json.loads(msg.data)
             event = data.get('event')
             source = data.get('source', '')
+            if event == 'ARM_REJECTED':
+                # comms 侧还原的解锁被拒原因（PX4 的 ACK 本身不带原因）
+                logger.warning(f"[mission_event] comms 上报解锁被拒 {data.get('reason', '')}："
+                               f"{data.get('detail', '')}"
+                               f"（pre_flight_checks_pass={data.get('pre_flight_checks_pass')}, "
+                               f"nav_state={data.get('nav_state')}）")
+                return
             if event != 'GOAL_UNREACHABLE':
                 return
             reason = data.get('reason', '')
