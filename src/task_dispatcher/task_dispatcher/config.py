@@ -50,6 +50,10 @@ PREVIEW_FPS = 5
 # 仅重编码档位（CODEC="h265"）生效；copy 档位无法加滤镜，此处配置不会生效
 PREVIEW_HEIGHT = 480
 
+# 预览推流目标码率（kbps）：480P/5fps 用 600k 足够，控制上行带宽；0 = 交给编码器默认码控
+# 仅重编码档位（CODEC="h265"）生效；copy 档位不改码率
+PREVIEW_VIDEO_KBPS = 600
+
 # 实时视频推流断流后的自动重连策略
 PREVIEW_RETRY_MAX = 0        # 连续失败重连次数上限；0=不限次数（外网中断恢复前一直重试）
 PREVIEW_RETRY_DELAY = 2      # 每次重连固定等待秒数（飞机常进出信号盲区，不逐级递增延时）
