@@ -10,7 +10,8 @@ import signal
 import os
 import platform
 from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, PREVIEW_FPS,
-                    PREVIEW_HEIGHT, PREVIEW_RETRY_MAX, PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
+                    PREVIEW_HEIGHT, PREVIEW_VIDEO_KBPS, PREVIEW_RETRY_MAX,
+                    PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
                     PREVIEW_START_TIMEOUT, PREVIEW_IO_TIMEOUT, PREVIEW_ACK_CONTINUE,
                     PREVIEW_HW_DECODE)
 import cv2
@@ -257,10 +258,11 @@ class VideoPreviewManager:
             cmd = []
             self._used_hw_decode = False
             if CODEC == "h264":
-                # copy 模式不能加滤镜，无法缩放分辨率；明确告警，避免配置了降分辨率却不生效
-                if PREVIEW_HEIGHT > 0:
-                    logger.warning(f'CODEC=h264 为流拷贝模式，无法缩放分辨率，输出保持相机原始分辨率'
-                                   f'（需要 {PREVIEW_HEIGHT}P 请切到 CODEC=h265）')
+                # copy 模式不能加滤镜也不改码率；明确告警，避免配置了却不生效
+                if PREVIEW_HEIGHT > 0 or PREVIEW_VIDEO_KBPS > 0:
+                    logger.warning(f'CODEC=h264 为流拷贝模式，无法缩放分辨率也无法限码率，'
+                                   f'输出保持相机原始规格（{PREVIEW_HEIGHT}P/'
+                                   f'{PREVIEW_VIDEO_KBPS}kbps 需要生效请切到 CODEC=h265）')
                 # 构建ffmpeg命令，参考用户提供的C++实现
                 cmd = [
                     'ffmpeg',
@@ -297,6 +299,11 @@ class VideoPreviewManager:
                     '-i', rtsp_url,            # 输入RTSP地址
                     '-vf', vf,                 # 抽帧（fps）+ 降分辨率（scale）
                     '-c:v', encoder,           # H.265 输入转 H.264（优先硬编，回退 libx264）
+                ]
+                # 目标码率：不写的话由编码器默认码控决定，上行带宽不可控
+                if PREVIEW_VIDEO_KBPS > 0:
+                    cmd += ['-b:v', f'{PREVIEW_VIDEO_KBPS}k']
+                cmd += [
                     '-pix_fmt', 'yuv420p',
                     '-profile:v', 'baseline',
                     '-r', str(PREVIEW_FPS),    # 输出限帧
@@ -306,8 +313,8 @@ class VideoPreviewManager:
                     '-f', 'flv',               # 输出格式为FLV
                     '-y'                       # 覆盖已存在的文件
                 ]
-                if self._used_hw_decode:
-                    logger.info(f'使用硬件解码 {hw_decoder} + 编码 {encoder}')
+                rate_desc = (f'{PREVIEW_VIDEO_KBPS}kbps' if PREVIEW_VIDEO_KBPS > 0 else '编码器默认')
+                logger.info(f'预览编码 {encoder} 码率 {rate_desc} 解码 {hw_decoder or "CPU 软解"}')
             
             # 输出侧读写超时：外网断开但 TCP 未报错时，ffmpeg 会一直卡在 socket 写入上；
             # 加超时让它自行退出，交给“进程退出即重连”处理，不必依赖它的进度日志
