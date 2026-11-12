@@ -6,17 +6,23 @@ set -uo pipefail
 
 # ---------------- 配置 (可被环境变量覆盖) ----------------
 RTSP_URL="${RTSP_URL:-}"                         # 显式给出则直接使用, 跳过 IP 探测
-RTMP_URL="${RTMP_URL:-rtmp://wrjxk.app.xmschain.com:1935/UAV/UAV00003/19yqM1eMpAVLSpD2S6Ej}"  # 推流地址
+RTMP_URL="${RTMP_URL:-rtmp://wrjxk.app.xmschain.com:1935/UAV/UAV00002/19yqM1eMpAVLSpD2S6Ej}"  # 推流地址
 MODE="${MODE:-auto}"                             # auto | gst | h264 | copy
 SRC_CODEC="${SRC_CODEC:-hevc}"                   # 摄像机源码流编码: hevc | h264, 用于选硬解器/解包器
-VIDEO_KBPS="${VIDEO_KBPS:-2000}"                 # 转码码率 (kbps)
+VIDEO_KBPS="${VIDEO_KBPS:-4000}"                 # 转码码率 (kbps), 太低画面会糊/出块
 GOP="${GOP:-50}"                                 # 关键帧间隔
+RTP_LATENCY_MS="${RTP_LATENCY_MS:-300}"          # rtspsrc 抖动缓冲(ms); 太小会丢迟到的包导致马赛克
+RESTART_EVERY_SEC="${RESTART_EVERY_SEC:-600}"    # 定时重开(秒), 0=关闭; 长时间运行掉码率/花屏时靠它恢复
+LOW_KBPS_PCT="${LOW_KBPS_PCT:-40}"               # 实测码率低于目标值的该百分比(且无发送积压)持续 LOW_KBPS_SEC 即重启, 0=关闭
+LOW_KBPS_SEC="${LOW_KBPS_SEC:-60}"               # 低码率持续多少秒判定编码异常
 RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}"          # tcp 更稳, 交换机/NAT 下建议 tcp
 RTSP_TIMEOUT_US="${RTSP_TIMEOUT_US:-15000000}"   # 15s 无数据则退出, 交给 systemd 重启
 RTSP_TIMEOUT_OPT="${RTSP_TIMEOUT_OPT:-auto}"     # auto 按 ffmpeg 版本选 rw_timeout/stimeout/timeout
 FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-warning}"    # 排查问题可设 info/verbose
-WATCHDOG_SEC="${WATCHDOG_SEC:-30}"               # 心跳/检查间隔(秒), 0=关闭守护
-STALL_SEC="${STALL_SEC:-90}"                     # 连续无数据写出多少秒判定卡死
+WATCHDOG_SEC="${WATCHDOG_SEC:-5}"                # 检查间隔(秒), 0=关闭守护
+STALL_SEC="${STALL_SEC:-10}"                     # 连续无数据发出多少秒判定卡死
+HEARTBEAT_SEC="${HEARTBEAT_SEC:-30}"             # 正常时的心跳日志间隔(秒)
+STARTUP_GRACE_SEC="${STARTUP_GRACE_SEC:-15}"     # 启动宽限期, 期内不判定卡死(等 RTSP 连接/编码器初始化)
 LOG_TAG="${LOG_TAG:-rtmp-relay}"
 FFMPEG="${FFMPEG:-ffmpeg}"
 
@@ -26,6 +32,7 @@ CAM_IP="${CAM_IP:-}"                             # 手动指定则跳过探测
 CAM_IFACE="${CAM_IFACE:-}"                       # 留空自动取默认路由网卡
 CAM_SCAN_TIMEOUT="${CAM_SCAN_TIMEOUT:-30}"       # arp-scan/nmap 扫描超时(秒)
 CAM_SCAN_WORKERS="${CAM_SCAN_WORKERS:-128}"      # 内置 ping 扫描并发数
+CAM_RETRY_SEC="${CAM_RETRY_SEC:-15}"             # 探测不到摄像机时的重试间隔(秒)
 
 RTSP_USER="${RTSP_USER:-admin}"
 RTSP_PASS="${RTSP_PASS:-123456}"
@@ -75,55 +82,101 @@ _ping_sweep() {
   done | xargs -r -P "$CAM_SCAN_WORKERS" -n 1 ping -c 1 -W 1 -n -q >/dev/null 2>&1
 }
 
-_scan_subnet() {
-  local iface="$1" cidr="$2"
+# 用 arp-scan/nmap 解析 "ip mac" 对应关系(输出到 stdout)。
+# 注意: 这两个工具用原始套接字自己发 ARP, 不会写入内核 ARP 表, 因此不能只依赖 ip neigh;
+# 它们的结果必须像这里一样从输出里解析。
+_tool_hits() {
+  local iface="$1" cidr="$2" out n
   if command -v arp-scan >/dev/null 2>&1; then
-    timeout "$CAM_SCAN_TIMEOUT" arp-scan -q --interface="$iface" "$cidr" >/dev/null 2>&1
+    out="$(timeout "$CAM_SCAN_TIMEOUT" arp-scan -q --interface="$iface" "$cidr" 2>/dev/null)"
+    printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^[0-9]+\./ && $2 ~ /^([0-9a-fA-F]{2}:){5}/ { print $1, tolower($2) }'
+    n="$(printf '%s\n' "$out" | grep -cE '^[0-9]+\.')"
+    echo "[$LOG_TAG] arp-scan $cidr: 发现 $n 台设备" >&2
   elif command -v nmap >/dev/null 2>&1; then
-    timeout "$CAM_SCAN_TIMEOUT" nmap -sn -n "$cidr" >/dev/null 2>&1
-  else
-    _ping_sweep "$cidr"
+    out="$(timeout "$CAM_SCAN_TIMEOUT" nmap -sn -n "$cidr" 2>/dev/null)"
+    printf '%s\n' "$out" | awk '
+      /^Nmap scan report for / { ip = $NF; gsub(/[()]/, "", ip) }
+      /^MAC Address: /        { print ip, tolower($3) }'
+    n="$(printf '%s\n' "$out" | grep -c 'Nmap scan report')"
+    echo "[$LOG_TAG] nmap $cidr: 发现 $n 台在线主机" >&2
   fi
   return 0
 }
 
+# 从 "ip mac" 列表里挑出目标 MAC 对应的 IP
+_mac_of() {
+  printf '%s\n' "$1" | awk -v m="$(printf '%s' "$CAM_MAC" | tr 'A-Z' 'a-z')" '$2 == m { print $1; exit }'
+}
+
+# 输出 "网卡 网段" 列表, 默认路由网卡在前; 可用 CAM_IFACE 限定
+_iface_cidrs() {
+  local def
+  def="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+  if [ -n "$CAM_IFACE" ]; then
+    ip -4 -o addr show dev "$CAM_IFACE" up 2>/dev/null | awk '$3 == "inet" { print $2, $4 }'
+    return 0
+  fi
+  [ -n "$def" ] && ip -4 -o addr show dev "$def" up 2>/dev/null | awk -v d="$def" '$3 == "inet" { print d, $4 }'
+  # 跳过 docker/veth 等虚拟网卡, 摄像机不会挂在上面
+  ip -4 -o addr show up 2>/dev/null |
+    awk -v d="$def" '$3 == "inet" && $2 != d && $4 !~ /^127\./ &&
+      $2 !~ /^(docker|veth|br-|virbr|tun|tap|vnet|cni|flannel|lo)/ { print $2, $4 }'
+}
+
 # 成功时向 stdout 输出 IP, 失败返回非 0
 discover_cam_ip() {
-  local ip iface cidr myip prefix net
+  local ip iface cidr myip prefix net round pairs hits
 
   # 1) 先查 ARP 缓存, 命中且能连通就直接用
   ip="$(_alive_cam_ip)" && { printf '%s\n' "$ip"; return 0; }
 
-  # 2) 确定扫描网卡与网段
   command -v ip >/dev/null 2>&1 || { echo "[$LOG_TAG] 错误: 缺少 ip 命令 (iproute2)" >&2; return 1; }
-  iface="${CAM_IFACE:-$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')}"
-  [ -n "$iface" ] || { echo "[$LOG_TAG] 错误: 找不到默认路由网卡, 可用 CAM_IFACE 指定" >&2; return 1; }
-  cidr="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '$3 == "inet" { print $4; exit }')"
-  [ -n "$cidr" ] || { echo "[$LOG_TAG] 错误: 网卡 $iface 没有 IPv4 地址" >&2; return 1; }
+  pairs="$(_iface_cidrs)"
+  [ -n "$pairs" ] || {
+    echo "[$LOG_TAG] 错误: 没有可用的 IPv4 网卡或网段 (可用 CAM_IFACE 指定)" >&2
+    return 1
+  }
 
-  myip="${cidr%%/*}"; prefix="${cidr##*/}"
-  if [ "$prefix" -ge 22 ]; then
-    net="${cidr%%/*}"
-  else
-    echo "[$LOG_TAG] 网段 /$prefix 过大, 仅在 $myip 所在的 /22 内扫描" >&2
-    prefix=22
-    net="$myip"
-  fi
+  # 2) 对所有本机网段各扫两轮, 覆盖启动慢/丢包的设备, 每轮后按 MAC 反查
+  for round in 1 2; do
+    while read -r iface cidr; do
+      [ -n "$iface" ] || continue
+      myip="${cidr%%/*}"; prefix="${cidr##*/}"
+      if [ "$prefix" -lt 22 ]; then
+        echo "[$LOG_TAG] 网段 /$prefix 过大, 仅在 $myip 所在的 /22 内扫描" >&2
+        prefix=22
+        net="$myip"
+      else
+        net="${cidr%%/*}"
+      fi
+      echo "[$LOG_TAG] 第 $round 轮: 扫描 $iface ($net/$prefix) 查找 $CAM_MAC ..." >&2
 
-  # 3) 主动扫描刷新 ARP 表, 再按 MAC 反查
-  echo "[$LOG_TAG] ARP 表未命中 $CAM_MAC, 开始扫描 $iface ($net/$prefix) ..." >&2
-  _scan_subnet "$iface" "$net/$prefix"
+      # 2a) ping 扫描: 走内核 ARP, 会真正刷新 ip neigh
+      _ping_sweep "$net/$prefix"
+      echo "[$LOG_TAG] ping 扫描 $net/$prefix: ARP 表 $(ip -4 neigh show 2>/dev/null | wc -l) 条" >&2
 
-  ip="$(_alive_cam_ip)" && { printf '%s\n' "$ip"; return 0; }
+      ip="$(_alive_cam_ip)" && { printf '%s\n' "$ip"; return 0; }
 
-  # 4) 部分摄像机禁 ICMP, ARP 表里有就先用, 由 ffmpeg 拉流结果兜底
-  if ip="$(_any_cam_ip)"; then
-    echo "[$LOG_TAG] 警告: $ip 无 ICMP 响应, 仍按 ARP 表使用" >&2
-    printf '%s\n' "$ip"
-    return 0
-  fi
+      # 3) 部分摄像机禁 ICMP, ARP 表里有就先用, 由推流结果兜底
+      if ip="$(_any_cam_ip)"; then
+        echo "[$LOG_TAG] 警告: $ip 无 ICMP 响应, 仍按 ARP 表使用" >&2
+        printf '%s\n' "$ip"
+        return 0
+      fi
 
-  echo "[$LOG_TAG] 未找到 MAC $CAM_MAC 对应的主机" >&2
+      # 2b) arp-scan/nmap 结果不写内核 ARP 表, 需从它们的输出里解析 IP/MAC
+      hits="$(_tool_hits "$iface" "$net/$prefix" </dev/null)"
+      ip="$(_mac_of "$hits")"
+      if [ -n "$ip" ]; then
+        echo "[$LOG_TAG] 摄像机 $CAM_MAC -> $ip (来自扫描工具)" >&2
+        printf '%s\n' "$ip"
+        return 0
+      fi
+    done <<< "$pairs"
+  done
+
+  echo "[$LOG_TAG] 未找到 MAC $CAM_MAC; 已扫描:$(printf '%s\n' "$pairs" | awk '{ printf " %s(%s)", $1, $2 }')" >&2
+  echo "[$LOG_TAG] 提示: 摄像机可能与主机不在同一网段(ARP 扫描只能发现同网段设备), 或未上电/未联网; 可给它配置同网段地址, 或用 CAM_IP 手动指定" >&2
   return 1
 }
 
@@ -133,12 +186,16 @@ command -v "$FFMPEG" >/dev/null 2>&1 || { echo "[$LOG_TAG] 错误: 找不到 ffm
 # ---------------- 解析摄像机地址 ----------------
 if [ -z "$RTSP_URL" ]; then
   if [ -z "$CAM_IP" ]; then
-    CAM_IP="$(discover_cam_ip)" || CAM_IP=""
+    attempt=0
+    # 探测失败不退出, 就地重试; 避免 systemd 反复重启刷计数
+    while :; do
+      attempt=$((attempt + 1))
+      CAM_IP="$(discover_cam_ip)" || CAM_IP=""
+      [ -n "$CAM_IP" ] && break
+      echo "[$LOG_TAG] 第 ${attempt} 次探测失败, ${CAM_RETRY_SEC}s 后重试" >&2
+      sleep "$CAM_RETRY_SEC"
+    done
   fi
-  [ -n "$CAM_IP" ] || {
-    echo "[$LOG_TAG] 错误: 无法按 MAC $CAM_MAC 定位摄像机 IP (可用 CAM_IP 手动指定)" >&2
-    exit 4
-  }
   RTSP_URL="rtsp://${RTSP_USER}:${RTSP_PASS}@${CAM_IP}:${RTSP_PORT}${RTSP_PATH}"
   echo "[$LOG_TAG] 摄像机 $CAM_MAC -> $CAM_IP"
 fi
@@ -152,6 +209,11 @@ _gst_nvenc() {
   command -v gst-launch-1.0 >/dev/null 2>&1 &&
     command -v gst-inspect-1.0 >/dev/null 2>&1 &&
     gst-inspect-1.0 nvv4l2h264enc >/dev/null 2>&1
+}
+
+# 编码器是否支持某属性(不同 JetPack 版本有差异, 拼了不存在的属性整条管线起不来)
+_gst_enc_prop() {
+  gst-inspect-1.0 nvv4l2h264enc 2>/dev/null | grep -qE "^[[:space:]]+$1[[:space:]]+:"
 }
 
 # ---------------- 进程守护与状态日志 ----------------
@@ -171,30 +233,50 @@ _RTSP_PORT="$(_url_port "$RTSP_URL" 554)"
 # 统计进程到指定端口那条 TCP 连接: 输出 "peer|sendq|sent|acked|recv", 取不到返回 1。
 # 注意: /proc/<pid>/io 的 wchar 只统计文件写, 不含 socket send, 不能用它判断推流是否还在动。
 _sock_stats() {
-  local pid="$1" port="$2" inos
-  inos="$(ls -l "/proc/$pid/fd" 2>/dev/null | sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p' | paste -sd'|')"
-  [ -n "$inos" ] || return 1
+  local port="$1"
   command -v ss >/dev/null 2>&1 || return 1
-  ss -tinpe 2>/dev/null | awk -v ino="$inos" -v port="$port" '
+  # 逐行解析: 状态行取 本端/对端/待发, 紧随其后的 info 行取字节数。
+  # 只认"对端端口 == port"的连接, 避免把无关 socket 的字节混进来
+  # (曾经把整份 ss 输出当成一个块, 结果取到 127.0.0.1:9090 的 622B 而误杀正常推流)。
+  ss -tinp 2>/dev/null | awk -v port="$port" '
     function val(s, pat,   r) {
       if (!match(s, pat)) return 0
       r = substr(s, RSTART, RLENGTH); sub(/^[^:]*:/, "", r); return r + 0
     }
-    function flush() {
-      if (blk != "" && blk ~ ("ino:(" ino ")") && blk ~ (":" port "([^0-9]|$)")) {
-        peers = peers (peers == "" ? "" : ",") peer
-        sendq += sndq
-        sent  += val(blk, "bytes_sent:[0-9]+")
-        acked += val(blk, "bytes_acked:[0-9]+")
-        recv  += val(blk, "bytes_received:[0-9]+")
-        found++
+    $1 ~ /^[A-Z][A-Z-]+$/ {
+      if ($3 ~ /^[0-9]+$/ && NF >= 5) {
+        peer = $5; sendq = $3 + 0; key = $4 " " $5
+        hit = (peer ~ (":" port "([^0-9]|$)"))
+      } else {
+        peer = ""; sendq = 0; hit = 0
       }
-      blk = ""
     }
-    /^State[[:space:]]/ { next }
-    /^[A-Z][A-Z-]*[[:space:]]/ { flush(); peer = $5; sndq = $3 + 0; blk = $0; next }
-    { blk = blk "\n" $0 }
-    END { flush(); if (found) printf "%s|%d|%d|%d|%d\n", peers, sendq, sent, acked, recv; else exit 1 }'
+    /bytes_(acked|sent|received):/ && hit {
+      if (key in seen) next
+      seen[key] = 1
+      peers = peers (peers == "" ? "" : ",") peer
+      total_q += sendq
+      sent  += val($0, "bytes_sent:[0-9]+")
+      acked += val($0, "bytes_acked:[0-9]+")
+      recv  += val($0, "bytes_received:[0-9]+")
+      found++
+    }
+    END { if (found) printf "%s|%d|%d|%d|%d\n", peers, total_q, sent, acked, recv; else exit 1 }'
+}
+
+# 排查用: 只打印对端端口匹配的那条连接(状态行 + info 行), 避免整份 ss 刷屏
+_sock_debug() {
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -tinp 2>/dev/null | awk -v port="$port" -v tag="$LOG_TAG" '
+    $1 ~ /^[A-Z][A-Z-]+$/ {
+      hit = ($3 ~ /^[0-9]+$/ && NF >= 5 && $5 ~ (":" port "([^0-9]|$)"))
+      if (hit) { gsub(/[ \t]+/, " ", $0); print "[" tag "] 调试: " $0 > "/dev/stderr" }
+      next
+    }
+    /bytes_(acked|sent|received):/ && hit {
+      gsub(/[ \t]+/, " ", $0); print "[" tag "] 调试:   " $0 > "/dev/stderr"
+    }'
 }
 
 trap '_stop_child; echo "[$LOG_TAG] $(_ts) 收到终止信号, 已停止" >&2; exit 0' TERM INT
@@ -213,7 +295,7 @@ run_supervised() {
 
   local pid start now last_change rc idle measured=0
   local rt src rp rsq rsent rack rrecv sp ssq ssent sack srecv
-  local acked_prev="" src_prev="" out_delta in_delta has_src=0
+  local acked_prev="" src_prev="" out_delta in_delta has_src=0 last_log cur grace_over=0 dumped=0 kbps=0 low_since=""
 
   echo "[$LOG_TAG] $(_ts) 启动: $*"
 
@@ -222,15 +304,24 @@ run_supervised() {
   _child_pid=$pid
   start=$(date +%s)
   last_change=$start
+  last_log=$start
 
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$WATCHDOG_SEC"
     kill -0 "$pid" 2>/dev/null || break
     now=$(date +%s)
     idle=$((now - last_change))
+    # 定时重开: 长时间运行后实际码率会一路下滑且不会自愈, 到点主动重启交给 systemd 拉起
+    if [ "$RESTART_EVERY_SEC" -gt 0 ] && [ $((now - start)) -ge "$RESTART_EVERY_SEC" ]; then
+      echo "[$LOG_TAG] $(_ts) 已连续运行 $((now - start))s, 按计划每 ${RESTART_EVERY_SEC}s 重启进程" >&2
+      _stop_child
+      return 7
+    fi
+    # 启动宽限期内不判定卡死: RTSP 建连 + 硬编初始化可能超过 STALL_SEC
+    [ $((now - start)) -ge "$STARTUP_GRACE_SEC" ] && grace_over=1
 
-    rt="$(_sock_stats "$pid" "$_RTMP_PORT")" || rt=""
-    src="$(_sock_stats "$pid" "$_RTSP_PORT")" || src=""
+    rt="$(_sock_stats "$_RTMP_PORT")" || rt=""
+    src="$(_sock_stats "$_RTSP_PORT")" || src=""
 
     # 拉流端(摄像机)收到的字节, 用于区分是摄像机没数据还是推流端没发出去。
     # 仅对 RTSP over TCP 有意义; UDP 传输时这条连接只有控制消息
@@ -247,7 +338,7 @@ run_supervised() {
       if [ "$measured" -eq 0 ]; then
         # 尚未观测到推流连接(启动初期或缺少 ss), 不做判断
         echo "[$LOG_TAG] $(_ts) 提示: 运行 $((now - start))s, 未找到推流 TCP 连接, 暂不判断卡死" >&2
-      elif [ "$idle" -ge "$STALL_SEC" ]; then
+      elif [ "$idle" -ge "$STALL_SEC" ] && [ "$grace_over" -eq 1 ]; then
         echo "[$LOG_TAG] $(_ts) 错误: 推流连接已断开 ${idle}s (拉流 $sp 本轮收到 ${in_delta}B), 重启进程" >&2
         _stop_child
         return 7
@@ -259,30 +350,59 @@ run_supervised() {
 
     IFS='|' read -r rp rsq rsent rack rrecv <<< "$rt"
     measured=1
-    [ "${rack:-0}" -eq 0 ] && rack=$rsent
-    out_delta=${acked_prev:+$((rack - acked_prev))}
+    # 以"应用交给内核的字节"(bytes_sent)为主指标, bytes_acked 仅作参考:
+    # 部分内核/网卡上 ACK 计数与实际发送不同步, 只看 acked 会误判
+    if [ "${rsent:-0}" -gt 0 ]; then cur=$rsent; else cur=${rack:-0}; fi
+    out_delta=${acked_prev:+$((cur - acked_prev))}
+    # 本轮实测推流码率(按检查间隔折算), 用于心跳展示和码率塌陷判定
+    kbps=$(( ${out_delta:-0} * 8 / WATCHDOG_SEC / 1000 ))
 
-    if [ -z "$acked_prev" ] || [ "${out_delta:-0}" -gt 0 ] || [ "$rack" -gt "$acked_prev" ]; then
+    if [ "${out_delta:-0}" -gt 0 ] || { [ -z "$acked_prev" ] && [ "${cur:-0}" -ge 0 ]; }; then
       last_change=$now
-      echo "[$LOG_TAG] $(_ts) 心跳: 运行 $((now - start))s, 推流 $rp 已发 ${rack}B${out_delta:+(本轮 +${out_delta}B)} 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B"
+      dumped=0
+      # 只在首次和每隔 HEARTBEAT_SEC 打一次, 避免检查间隔调小后日志刷屏
+      if [ -z "$acked_prev" ] || [ $((now - last_log)) -ge "$HEARTBEAT_SEC" ]; then
+        echo "[$LOG_TAG] $(_ts) 心跳: 运行 $((now - start))s, 推流 $rp 已发 ${cur}B(对端确认 ${rack}B)${out_delta:+(本轮 +${out_delta}B, 约 ${kbps}kbps)} 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B"
+        last_log=$now
+      fi
     else
-      echo "[$LOG_TAG] $(_ts) 警告: ${idle}s 无数据发出, 推流 $rp 已发 ${rack}B 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B" >&2
+      echo "[$LOG_TAG] $(_ts) 警告: ${idle}s 无数据发出, 推流 $rp 已发 ${cur}B(对端确认 ${rack}B) 待发 ${rsq}B | 拉流 $sp 本轮收到 ${in_delta}B" >&2
+      if [ "$dumped" -eq 0 ]; then
+        dumped=1
+        _sock_debug "$_RTMP_PORT"
+        [ "$has_src" -eq 1 ] && _sock_debug "$_RTSP_PORT"
+      fi
       if [ "$rsq" -gt 0 ]; then
         echo "[$LOG_TAG] $(_ts) 诊断: 数据积压在内核发送缓冲(待发 ${rsq}B), 对端没有接收" >&2
       elif [ "$has_src" -eq 0 ]; then
         echo "[$LOG_TAG] $(_ts) 诊断: 未找到拉流连接($sp), 无法判断摄像机侧是否有数据" >&2
       elif [ "$in_delta" -eq 0 ]; then
-        echo "[$LOG_TAG] $(_ts) 诊断: 摄像机侧也没有新数据到达, 问题在拉流端(RTSP)" >&2
+        echo "[$LOG_TAG] $(_ts) 诊断: 摄像机侧也没有新数据到达, 问题在拉流端(RTSP); 若 RTSP 走 UDP, 该统计不适用" >&2
       else
         echo "[$LOG_TAG] $(_ts) 诊断: 拉流正常但编码/推流没有输出, 问题在本地编码或 rtmpsink" >&2
       fi
-      if [ "$idle" -ge "$STALL_SEC" ]; then
+      if [ "$idle" -ge "$STALL_SEC" ] && [ "$grace_over" -eq 1 ]; then
         echo "[$LOG_TAG] $(_ts) 错误: 连续 ${idle}s 无数据发出, 判定推流已中断, 重启进程" >&2
         _stop_child
         return 7
       fi
     fi
-    acked_prev=$rack
+
+    # 码率塌陷自愈: CBR 下实测码率长期明显低于目标且发送队列没有积压, 说明编码端已经跟不上,
+    # 这种情况不会自己恢复; 有积压则属于链路带宽问题, 不在这里重启
+    if [ "$LOW_KBPS_PCT" -gt 0 ] && [ "$grace_over" -eq 1 ] && [ "${rsq:-0}" -eq 0 ] && [ "$kbps" -ge 0 ]; then
+      if [ "$kbps" -lt $(( VIDEO_KBPS * LOW_KBPS_PCT / 100 )) ]; then
+        [ -n "$low_since" ] || low_since=$now
+        if [ $((now - low_since)) -ge "$LOW_KBPS_SEC" ]; then
+          echo "[$LOG_TAG] $(_ts) 错误: 码率已持续 $((now - low_since))s 低于 $(( VIDEO_KBPS * LOW_KBPS_PCT / 100 ))kbps (当前 ${kbps}kbps), 判定编码异常, 重启进程" >&2
+          _stop_child
+          return 7
+        fi
+      else
+        low_since=""
+      fi
+    fi
+    acked_prev=$cur
   done
 
   wait "$pid"
@@ -312,11 +432,19 @@ if [ "$MODE" = gst ]; then
   esac
   echo "[$LOG_TAG] 开始: $RTSP_URL -> $RTMP_URL  (gst: nvv4l2decoder + nvv4l2h264enc ${VIDEO_KBPS}kbps)"
   export GST_DEBUG="${GST_DEBUG:-2}" GST_DEBUG_NO_COLOR=1
+  # maxperf-enable: 不让 Jetson 因"负载低"降频, 长时间运行后编码跟不上会导致实际码率一路下滑
+  # insert-sps-pps: 定期带上 SPS/PPS, 播放端丢帧后能自己重新同步, 减少持续花屏
+  enc=(nvv4l2h264enc bitrate="$((VIDEO_KBPS * 1000))" iframeinterval="$GOP")
+  _gst_enc_prop maxperf-enable && enc+=(maxperf-enable=true)
+  _gst_enc_prop insert-sps-pps && enc+=(insert-sps-pps=true)
+  _gst_enc_prop control-rate && enc+=(control-rate=1)
+  # 不同 JetPack 版本支持的属性不同, 打印实际生效的编码参数, 便于远程核对码率为什么上不去
+  echo "[$LOG_TAG] 编码参数: ${enc[*]}"
   run_supervised gst-launch-1.0 -e \
-    rtspsrc location="$RTSP_URL" protocols="$RTSP_TRANSPORT" latency=100 \
+    rtspsrc location="$RTSP_URL" protocols="$RTSP_TRANSPORT" latency="$RTP_LATENCY_MS" \
     ! "$depay" ! "$parser" ! nvv4l2decoder ! nvvidconv \
     ! 'video/x-raw(memory:NVMM),format=NV12' \
-    ! nvv4l2h264enc bitrate="$((VIDEO_KBPS * 1000))" iframeinterval="$GOP" \
+    ! "${enc[@]}" \
     ! h264parse ! flvmux streamable=true ! rtmpsink location="$RTMP_URL"
   exit $?
 fi
