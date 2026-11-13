@@ -26,6 +26,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger('registration')
 
+
+def is_success_status(status) -> bool:
+    """
+    平台回包状态码自适应判断
+
+    Register / KeepAlive 响应里的 status 有时是字符串 "200"，有时是整数 200（甚至 200.0），
+    早先只按字符串比较，遇到整数回包会永远判为注册失败 —— 注册不成功会连带把
+    开机自动持续推流一起卡住（监督线程以「注册通过」为起流条件），这里统一按数值判断。
+    """
+    if isinstance(status, bool):
+        return False
+    try:
+        return int(float(str(status).strip())) == 200
+    except (TypeError, ValueError):
+        return False
+
 class Registration:
     """
     设备注册保活类，负责设备注册和心跳保活功能
@@ -208,7 +224,7 @@ class Registration:
         """
         try:
             # 检查响应状态
-            if response_data.get('status') == "200":
+            if is_success_status(response_data.get('status')):
                 body = response_data.get('body', {})
                 
                 # 更新配置
@@ -235,7 +251,7 @@ class Registration:
                 
             else:
                 error_msg = response_data.get('error', 'Unknown error')
-                logger.error(f'注册失败: {error_msg}')
+                logger.error(f'注册失败: {error_msg}, status={response_data.get("status")!r}')
                 self.registration_status = False
                 
                 # 如果注册失败次数过多，等待一段时间后重试
@@ -398,12 +414,12 @@ class Registration:
         """
         try:
             # 检查响应状态
-            if response_data.get('status') == "200":
+            if is_success_status(response_data.get('status')):
                 logger.info('心跳响应成功')
                 self.keepalive_response_count = 0
             else:
                 error_msg = response_data.get('error', 'Unknown error')
-                logger.warning(f'心跳响应失败: {error_msg}')
+                logger.warning(f'心跳响应失败: {error_msg}, status={response_data.get("status")!r}')
                 # 心跳响应失败也视为失败，保留计数器状态
                 logger.debug(f'心跳响应失败，当前失败计数: {self.keepalive_response_count}')
                 # 如果失败次数达到阈值，标记设备需要重新注册

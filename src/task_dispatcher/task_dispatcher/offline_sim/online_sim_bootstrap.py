@@ -64,6 +64,11 @@ cam_url = os.environ.get('SIM_CAMERA01_URL', '').strip()
 if cam_url:
     overrides['CAMERA01_URL'] = cam_url
     overrides['ENABLE_VIDEO'] = os.environ.get('SIM_ENABLE_VIDEO', 'true').lower() == 'true'
+    # 开机自动推真机平台默认关（推流地址来自 config.AUTO_PUSH_URL）；SIM_ENABLE_VIDEO=true 时才允许打开
+    overrides['AUTO_PREVIEW_PUSH'] = (
+        overrides['ENABLE_VIDEO']
+        and os.environ.get('SIM_AUTO_PUSH', 'false').lower() == 'true'
+    )
     # 仿真相机桥输出的已是 H.264；真机配置的 h265 分支用 Rockchip 硬件编码器
     # (h264_rkmpp)，x86 仿真机上不存在，会让平台推流即时失败（节点仍回 200）。
     # 这里改走 h264 透传（-c:v copy）。
