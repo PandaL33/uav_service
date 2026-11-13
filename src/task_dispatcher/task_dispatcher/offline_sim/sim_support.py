@@ -64,6 +64,7 @@ SIM_CONFIG_OVERRIDES: Dict[str, Any] = {
     'CAMERA01_URL': '',               # 无 RTSP 相机
     'CAMERA02_URL': '',
     'ENABLE_VIDEO': False,            # 仿真无相机，关闭视频预览/录制，避免对空 URL 探测刷屏
+    'AUTO_PREVIEW_PUSH': False,       # 仿真不自动推真机平台，需要时用 SIM_AUTO_PUSH=true 打开
     'PTZ_URL': '',                    # 无云台
     'RECORD_FILE_PATH': '/tmp/uav_offline_sim/rtsp',
     'PCD_FILE_PATH': '/tmp/uav_offline_sim/test.pcd',

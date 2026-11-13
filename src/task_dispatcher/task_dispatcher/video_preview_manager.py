@@ -13,7 +13,8 @@ from config import (CAMERAID, CAMERA01_URL, CAMERA02_URL, CODEC, ENABLE_VIDEO, P
                     PREVIEW_HEIGHT, PREVIEW_VIDEO_KBPS, PREVIEW_RETRY_MAX,
                     PREVIEW_RETRY_DELAY, PREVIEW_RETRY_RESET_SEC,
                     PREVIEW_START_TIMEOUT, PREVIEW_IO_TIMEOUT, PREVIEW_ACK_CONTINUE,
-                    PREVIEW_HW_DECODE)
+                    PREVIEW_HW_DECODE, AUTO_PREVIEW_PUSH, AUTO_PUSH_URL,
+                    AUTO_PUSH_CHECK_INTERVAL)
 import cv2
 
 # 配置日志
@@ -85,7 +86,7 @@ class VideoPreviewManager:
     实现PlayVideo和StopVideo功能
     """
     
-    def __init__(self, node, mqtt_client, response_topic):
+    def __init__(self, node, mqtt_client, response_topic, robot_sn=''):
         """
         初始化视频预览管理器
         
@@ -93,10 +94,12 @@ class VideoPreviewManager:
             node: ROS2节点实例
             mqtt_client: MQTT客户端实例
             response_topic: MQTT响应主题
+            robot_sn: 设备SN，用于拼接自动推流地址
         """
         self.node = node
         self.mqtt_client = mqtt_client
         self.response_topic = response_topic
+        self.robot_sn = robot_sn
         
         # 存储当前运行的视频流进程
         self.running_streams = {}
@@ -109,6 +112,14 @@ class VideoPreviewManager:
         self._stop_events = {}
         # 本次启动是否用了硬件解码，供失败后回退 CPU 重试判断
         self._used_hw_decode = False
+        # 开机自动持续推流：每个摄像头是否「期望在线」，以及是否有重连循环已在负责
+        self._auto_wanted = {}
+        self._restarting = set()
+        self._auto_stop_event = Event()
+        self._auto_thread = None
+        self._platform_ready_logged = None
+        # 串行化「停旧流 + 起新流」：防止平台播放命令与监督线程同时各起一条重复推流
+        self._switch_lock = Lock()
         
         # 摄像头RTSP地址配置
         self.camera_rtsp_addresses = {CAMERAID: CAMERA01_URL}
@@ -125,6 +136,7 @@ class VideoPreviewManager:
         
         logger.info('视频预览管理器已初始化')
         logger.info(f'摄像头RTSP配置: {self.camera_rtsp_addresses}')
+        self._start_auto_push()
     
     def process_play_video(self, message_data):
         """
@@ -167,16 +179,22 @@ class VideoPreviewManager:
             # 收到 100 会继续等待；真正可播与否由下面的终态 ACK 决定
             self.send_ack_response(message_data, PREVIEW_ACK_CONTINUE, 'continue', {})
             
-            # 停止该摄像头当前可能正在运行的流
-            self._stop_stream(camera_id)
-            
-            # 启动新的视频流
-            success = self._start_stream(camera_id, trans_type, push_url, username, password)
-
-            if not success and self._used_hw_decode:
-                # 硬解在这台机器/这路码流上起不来：整体退回 CPU 软解重试一次，后续不再试硬解
-                _disable_hw_decode(f'cameraId={camera_id} 硬件解码启动失败')
+            # 平台的播放命令同时把该摄像头标记为「期望持续在线」：
+            # 之后断流由重连循环负责，重连也救不回来时由自动推流监督线程补起
+            with self._switch_lock:
+                with self.streams_lock:
+                    self._auto_wanted[camera_id] = True
+                
+                # 停止该摄像头当前可能正在运行的流
+                self._stop_stream(camera_id)
+                
+                # 启动新的视频流
                 success = self._start_stream(camera_id, trans_type, push_url, username, password)
+
+                if not success and self._used_hw_decode:
+                    # 硬解在这台机器/这路码流上起不来：整体退回 CPU 软解重试一次，后续不再试硬解
+                    _disable_hw_decode(f'cameraId={camera_id} 硬件解码启动失败')
+                    success = self._start_stream(camera_id, trans_type, push_url, username, password)
             
             if success:
                 logger.info(f'成功启动视频流: cameraId={camera_id}, type={trans_type}, url={push_url}')
@@ -207,8 +225,11 @@ class VideoPreviewManager:
                 self.send_ack_response(message_data, 400, '缺少必要参数: cameraId', {})
                 return
             
-            # 停止视频流
-            success = self._stop_stream(camera_id)
+            # 停止视频流；平台的停止命令同时撤销「期望在线」，否则监督线程会立刻补起来
+            with self._switch_lock:
+                with self.streams_lock:
+                    self._auto_wanted[camera_id] = False
+                success = self._stop_stream(camera_id)
             
             if success:
                 logger.info(f'成功停止视频流: cameraId={camera_id}')
@@ -221,6 +242,74 @@ class VideoPreviewManager:
             logger.error(f'处理停止视频命令时出错: {str(e)}')
             self.send_ack_response(message_data, 500, f'处理错误: {str(e)}', {})
     
+    def _start_auto_push(self):
+        """启动自动推流监督线程：不依赖平台点「播放」，通信成功即持续推流"""
+        if not (AUTO_PREVIEW_PUSH and ENABLE_VIDEO):
+            logger.info('开机自动推流未启用（AUTO_PREVIEW_PUSH 或 ENABLE_VIDEO 已关闭）')
+            return
+        self._auto_thread = Thread(target=self._auto_push_loop, daemon=True)
+        self._auto_thread.start()
+
+    def _auto_push_loop(self):
+        interval = max(1.0, float(AUTO_PUSH_CHECK_INTERVAL))
+        logger.info(f'开机自动推流已启用: {AUTO_PUSH_URL}（每 {interval:g}s 检查一次）')
+        while not self._auto_stop_event.wait(interval):
+            try:
+                self._ensure_auto_streams()
+            except Exception as e:
+                logger.error(f'自动推流监督异常: {str(e)}')
+
+    def _ensure_auto_streams(self):
+        """把「期望在线但当前没有推流进程」的摄像头补起来"""
+        for camera_id in list(self.camera_rtsp_addresses.keys()):
+            with self.streams_lock:
+                # 默认期望在线；平台下发过 StopVideo 才撤销
+                wanted = self._auto_wanted.get(camera_id, True)
+                restarting = camera_id in self._restarting
+                params = dict(self._stream_params.get(camera_id) or {})
+            # 重连循环已经在负责（它本身不限次数），这里让路，避免同一路起两条流
+            if not wanted or restarting or self._is_streaming(camera_id):
+                continue
+            if not self._check_platform_ready():
+                continue
+            if not params:
+                push_url = self._auto_push_url(camera_id)
+                if not push_url:
+                    continue
+                params = {'trans_type': 'RTMP', 'push_url': push_url,
+                          'username': '', 'password': ''}
+            logger.info(f'自动推流[{camera_id}] -> {params["push_url"]}')
+            with self._switch_lock:
+                # 起流前再确认一次：等 `_switch_lock` 期间可能已被重连循环或平台命令补上
+                if self._is_streaming(camera_id):
+                    continue
+                self._stop_stream(camera_id)
+                self._start_stream(camera_id, params['trans_type'], params['push_url'],
+                                   params['username'], params['password'])
+
+    def _auto_push_url(self, camera_id):
+        """按 config.AUTO_PUSH_URL 模板拼推流地址（{sn} 取 robot_sn 参数）"""
+        try:
+            return AUTO_PUSH_URL.format(sn=self.robot_sn, camera_id=camera_id)
+        except (KeyError, IndexError) as e:
+            logger.error(f'自动推流地址模板无效 AUTO_PUSH_URL={AUTO_PUSH_URL}: {str(e)}')
+            return ''
+
+    def _check_platform_ready(self):
+        """与后端通信是否成功：MQTT 已连接 + 设备注册通过；状态变化时才打日志"""
+        ready = False
+        if getattr(self.node, 'mqtt_connected', False):
+            registration = getattr(self.node, 'registration_manager', None)
+            try:
+                ready = bool(registration is not None and registration.is_registered())
+            except Exception:
+                ready = False
+        if self._platform_ready_logged != ready:
+            self._platform_ready_logged = ready
+            logger.info('平台通信已恢复，开始自动推流' if ready
+                        else '平台通信未成功（MQTT 未连接或未注册通过），暂缓自动推流')
+        return ready
+
     def _start_stream(self, camera_id, trans_type, push_url, username, password, is_restart=False):
         """
         启动视频流
@@ -509,6 +598,17 @@ class VideoPreviewManager:
         if not params or stop_event is None or stop_event.is_set():
             return
 
+        # 标记「本摄像头的重连由这里负责」，自动推流监督线程据此让路，避免同时起两条流
+        with self.streams_lock:
+            self._restarting.add(camera_id)
+        try:
+            self._restart_loop(camera_id, params, stop_event)
+        finally:
+            with self.streams_lock:
+                self._restarting.discard(camera_id)
+
+    def _restart_loop(self, camera_id, params, stop_event):
+        """_schedule_restart 的重连主体，退出即表示不再负责该摄像头的重连"""
         # 固定间隔重连：飞机进出信号盲区后链路可能几十秒才恢复，递增延时会拖慢画面恢复
         delay = max(0.0, float(PREVIEW_RETRY_DELAY))
         limit = f'/{PREVIEW_RETRY_MAX}' if PREVIEW_RETRY_MAX > 0 else ''
@@ -527,10 +627,15 @@ class VideoPreviewManager:
                 logger.info(f'重连已取消（收到停止请求或新指令）: cameraId={camera_id}')
                 return
             logger.info(f'开始第 {attempt} 次重连: cameraId={camera_id}')
-            if self._start_stream(camera_id, params['trans_type'], params['push_url'],
-                                  params['username'], params['password'], is_restart=True):
-                # 起来的新进程由它自己的监控线程负责后续断流，本循环退出
-                return
+            with self._switch_lock:
+                # 等锁期间可能收到停止请求，或自动推流监督线程已补起新流（停止事件被替换）
+                if stop_event.is_set() or self._stop_events.get(camera_id) is not stop_event:
+                    logger.info(f'重连已取消（收到停止请求或新指令）: cameraId={camera_id}')
+                    return
+                if self._start_stream(camera_id, params['trans_type'], params['push_url'],
+                                      params['username'], params['password'], is_restart=True):
+                    # 起来的新进程由它自己的监控线程负责后续断流，本循环退出
+                    return
 
     def _log_ffmpeg_tail(self, camera_id, log_path, lines=20):
         """异常退出时打印 ffmpeg 日志尾部，用于定位退出码原因"""
@@ -680,6 +785,12 @@ class VideoPreviewManager:
         """
         关闭视频预览管理器，清理所有资源
         """
+        # 先停监督线程，否则它会在关流过程中把流重新起来
+        self._auto_stop_event.set()
+        if self._auto_thread is not None:
+            self._auto_thread.join(timeout=max(1.0, float(AUTO_PUSH_CHECK_INTERVAL)) + 1)
+            self._auto_thread = None
+
         # 停止所有正在运行的视频流
         camera_ids = list(self.running_streams.keys())
         for camera_id in camera_ids:

@@ -138,10 +138,12 @@ class TaskDispatcherNode(Node):
             self.perf_monitor.install()
 
         # 初始化视频预览管理器
+        # robot_sn 用于开机自动推流地址模板（config.AUTO_PUSH_URL 的 {sn}）
         self.video_preview_manager = VideoPreviewManager(
             node=self,
             mqtt_client=self.mqtt_client,
-            response_topic=self.mqtt_response_topic
+            response_topic=self.mqtt_response_topic,
+            robot_sn=self.robot_sn
         )
 
         if self.perf_monitor is not None:
