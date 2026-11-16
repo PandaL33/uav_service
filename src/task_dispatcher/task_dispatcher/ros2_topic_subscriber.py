@@ -227,9 +227,22 @@ class Ros2TopicSubscriber:
         # 定时更新服务和摄像头状态
         # 立即执行一次
         self.update_services_and_cameras_status()
-        # 然后每5分钟定时执行
-        self.node.create_timer(10, self.update_services_and_cameras_status)
-        
+        # 然后每 10s 定时执行。
+        # 注意：这两个查询会同步做 ROS 服务发现 / RTSP/HTTP 探测，实测单次阻塞
+        # 3~6s；直接挂在单线程 executor 的定时器上，会把同进程 1Hz 的
+        # /mission_event 执行层心跳饿死 >2.5s，令 safety 周期性误判
+        # TASK_LAYER_LOST（每 10s 一次，最终 HOLD→LAND）。必须放后台线程执行。
+        self._status_thread = None
+        self.node.create_timer(10, self._update_status_async)
+
+    def _update_status_async(self):
+        """在后台线程刷新服务/摄像头状态，避免阻塞 executor 饿死心跳。"""
+        if self._status_thread is not None and self._status_thread.is_alive():
+            return     # 上一轮还没跑完，跳过本轮
+        self._status_thread = threading.Thread(
+            target=self.update_services_and_cameras_status, daemon=True)
+        self._status_thread.start()
+
         logger.info('Ros2TopicSubscriber initialized')
     
     def _create_subscribers(self):
