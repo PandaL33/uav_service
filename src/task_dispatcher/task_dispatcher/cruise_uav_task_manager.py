@@ -1252,6 +1252,13 @@ class CruiseUavTaskManager:
                                 self.consec_goals = 0
                             # 记入来路（平台可下发“沿线返航”按此倒序退回）
                             self._remember_visited_waypoint(pos)
+                            # 结论级事件：本航点确实到达。safety 侧的错误预算按
+                            # 「连续」口径消费（与上面两个计数器同生同灭），收到本
+                            # 事件即清零 GOAL_UNREACHABLE，避免全架次累计误判返航。
+                            self._publish_mission_event(
+                                'GOAL_REACHED',
+                                goal_seq=self.goal_seq_counter,
+                                flight_epoch=getattr(self, 'flight_epoch', 'NA'))
                             break
                         # 成功=False：区分「停滞不可达(GOAL_UNREACHABLE)」与「其他失败」
                         msg = result_action.get('message', '')
