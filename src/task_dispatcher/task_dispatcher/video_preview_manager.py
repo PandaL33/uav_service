@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import re
 import subprocess
 import time
 import json
@@ -120,6 +121,10 @@ class VideoPreviewManager:
         self._platform_ready_logged = None
         # 串行化「停旧流 + 起新流」：防止平台播放命令与监督线程同时各起一条重复推流
         self._switch_lock = Lock()
+        # 限频日志：断流重连时同一类消息每 2s 一条，不限频会把日志刷满
+        self._log_throttle = {}
+        # 上次打印的 ffmpeg 错误尾部签名，用于相同错误只打印一次
+        self._ffmpeg_tail_state = {}
         
         # 摄像头RTSP地址配置
         self.camera_rtsp_addresses = {CAMERAID: CAMERA01_URL}
@@ -355,6 +360,8 @@ class VideoPreviewManager:
                 # 构建ffmpeg命令，参考用户提供的C++实现
                 cmd = [
                     'ffmpeg',
+                    '-hide_banner',            # 不打版本/编译选项等横幅
+                    '-nostats',                # 不打 frame=/fps= 进度，日志只留诊断信息
                     '-rtsp_transport', 'tcp',  # 使用TCP传输，提高稳定性
                     '-timeout', '5000000',    # 设置超时时间，单位微秒
                     '-i', rtsp_url,            # 输入RTSP地址
@@ -376,6 +383,8 @@ class VideoPreviewManager:
                     vf += f',scale=-2:{PREVIEW_HEIGHT}'
                 cmd = [
                     'ffmpeg',
+                    '-hide_banner',            # 不打版本/编译选项等横幅
+                    '-nostats',                # 不打 frame=/fps= 进度，日志只留诊断信息
                     '-rtsp_transport', 'tcp',  # 使用TCP传输，提高稳定性
                     '-timeout', '5000000',    # 设置超时时间，单位微秒
                 ]
@@ -418,7 +427,8 @@ class VideoPreviewManager:
                 cmd.append(push_url)
             
             # 记录命令
-            logger.info(f'准备启动视频流命令: {" ".join(cmd)}')
+            self._log_throttled(f'ffmpeg_cmd_{camera_id}', logger.info,
+                                f'准备启动视频流命令: {" ".join(cmd)}', 60.0)
             
             # ffmpeg 的 stderr 落地到文件：devnull 会让异常退出（如 returncode 187）
             # 完全失去原因，异常退出时打印日志尾部便于定位
@@ -467,7 +477,8 @@ class VideoPreviewManager:
                                     args=(camera_id, process, log_path, log_file), daemon=True)
             monitor_thread.start()
             
-            logger.info(f'启动预览[{camera_id}] 推送至[{push_url}] 成功')
+            self._log_throttled(f'stream_up_{camera_id}', logger.info,
+                                f'启动预览[{camera_id}] 推送至[{push_url}] 成功', 60.0)
             return True
             
         except Exception as e:
@@ -545,12 +556,16 @@ class VideoPreviewManager:
                 # 由 _stop_stream 主动终止（如切换推流地址），不是故障
                 logger.info(f'视频流已按请求停止: cameraId={camera_id}, returncode={process.returncode}')
             elif process.returncode != 0:
-                logger.error(f'视频流进程异常退出: cameraId={camera_id}, returncode={process.returncode}')
+                self._log_throttled(f'stream_exit_{camera_id}', logger.error,
+                                    f'视频流进程异常退出: cameraId={camera_id}, '
+                                    f'returncode={process.returncode}', 30.0)
                 self._log_ffmpeg_tail(camera_id, log_path)
                 self._schedule_restart(camera_id)
             else:
                 # 预览流不应自行结束（如相机断流导致输入 EOF 时 ffmpeg 会正常退出），同样按断流处理
-                logger.warning(f'视频流意外结束(returncode=0，输入源可能已断流): cameraId={camera_id}')
+                self._log_throttled(f'stream_exit0_{camera_id}', logger.warning,
+                                    f'视频流意外结束(returncode=0，输入源可能已断流): '
+                                    f'cameraId={camera_id}', 30.0)
                 self._log_ffmpeg_tail(camera_id, log_path)
                 self._schedule_restart(camera_id)
                 
@@ -621,12 +636,15 @@ class VideoPreviewManager:
                 return
             with self.streams_lock:
                 self._restart_counts[camera_id] = self._restart_counts.get(camera_id, 0) + 1
-            logger.warning(f'视频流断开，{delay:g}s 后第 {attempt}{limit} 次重连: cameraId={camera_id}')
+            self._log_throttled(f'stream_retry_{camera_id}', logger.warning,
+                                f'视频流断开，{delay:g}s 后第 {attempt}{limit} 次重连: '
+                                f'cameraId={camera_id}', 30.0)
             # 等待期间可能收到停止请求，或已下发新的播放命令（停止事件被替换）
             if stop_event.wait(delay) or self._stop_events.get(camera_id) is not stop_event:
                 logger.info(f'重连已取消（收到停止请求或新指令）: cameraId={camera_id}')
                 return
-            logger.info(f'开始第 {attempt} 次重连: cameraId={camera_id}')
+            self._log_throttled(f'stream_retry_start_{camera_id}', logger.info,
+                                f'开始第 {attempt} 次重连: cameraId={camera_id}', 30.0)
             with self._switch_lock:
                 # 等锁期间可能收到停止请求，或自动推流监督线程已补起新流（停止事件被替换）
                 if stop_event.is_set() or self._stop_events.get(camera_id) is not stop_event:
@@ -637,19 +655,69 @@ class VideoPreviewManager:
                     # 起来的新进程由它自己的监控线程负责后续断流，本循环退出
                     return
 
-    def _log_ffmpeg_tail(self, camera_id, log_path, lines=20):
-        """异常退出时打印 ffmpeg 日志尾部，用于定位退出码原因"""
+    def _log_ffmpeg_tail(self, camera_id, log_path, lines=8):
+        """异常退出时打印 ffmpeg 日志尾部，用于定位退出码原因
+
+        断流重连时 ffmpeg 会以同一原因反复退出，日志尾部（横幅 + 报错）每 2s 刷一遍。
+        这里只保留诊断行，并做去重：相同内容 60s 内只打印一次，其余折算为抑制计数。
+        """
         if not log_path or not os.path.isfile(log_path):
-            logger.error(f'视频流可能需要重新启动: cameraId={camera_id}（无 ffmpeg 日志）')
+            self._log_throttled(f'stream_dead_{camera_id}', logger.error,
+                                f'视频流可能需要重新启动: cameraId={camera_id}（无 ffmpeg 日志）',
+                                30.0)
             return
         try:
             with open(log_path, 'r', errors='ignore') as f:
-                tail = f.read().splitlines()[-lines:]
+                tail = f.readlines()[-200:]
         except OSError as e:
             logger.error(f'读取 ffmpeg 日志失败: {e}')
             return
-        logger.error(f'ffmpeg 日志尾部（{log_path}）:{os.linesep}' + os.linesep.join(tail))
-        logger.error(f'视频流可能需要重新启动: cameraId={camera_id}')
+        meaningful = [ln.rstrip() for ln in tail if not self._is_ffmpeg_tail_noise(ln)][-lines:]
+        # ffmpeg 每次启动的日志带随机对象地址（如 [tcp @ 0xaaaab1cc0]），归一化后才能判断是否同一错误
+        signature = re.sub(r'0x[0-9a-fA-F]+', '0xADDR', '\n'.join(meaningful))
+        now = time.time()
+        last_sig, last_time, suppressed = self._ffmpeg_tail_state.get(camera_id, ('', 0.0, 0))
+        if signature == last_sig and now - last_time < 60.0:
+            self._ffmpeg_tail_state[camera_id] = (last_sig, last_time, suppressed + 1)
+            self._log_throttled(f'stream_dead_{camera_id}', logger.error,
+                                f'视频流可能需要重新启动: cameraId={camera_id}'
+                                f'（ffmpeg 输出与上次相同，期间重复 {suppressed + 1} 次，明细已省略）',
+                                30.0)
+            return
+        self._ffmpeg_tail_state[camera_id] = (signature, now, 0)
+        detail = os.linesep.join(meaningful) if meaningful else '（无有效诊断行）'
+        logger.error(f'ffmpeg 日志尾部（{log_path}）:{os.linesep}' + detail)
+        self._log_throttled(f'stream_dead_{camera_id}', logger.error,
+                            f'视频流可能需要重新启动: cameraId={camera_id}', 30.0)
+
+    # ffmpeg 启动横幅、流参数、进度统计等行对定位退出原因没有帮助，打印尾部时过滤掉
+    # 比较前会 strip，所以这里都写成去掉行首缩进的形式
+    _FFMPEG_TAIL_NOISE_PREFIX = (
+        'ffmpeg version', 'built with', 'configuration:', 'lib',
+        'Press [q]', 'frame=', 'size=', 'Lsize=', 'Stream #', 'Input #',
+        'Output #', 'Metadata:', 'Duration:', 'creation_time',
+        'comment', 'title', 'handler_name', 'vendor_id',
+        'Last message repeated',
+    )
+
+    @classmethod
+    def _is_ffmpeg_tail_noise(cls, line):
+        text = line.strip()
+        return (not text
+                or text.startswith(cls._FFMPEG_TAIL_NOISE_PREFIX)
+                or set(text) <= {'-'})
+
+    def _log_throttled(self, key, log_fn, message, interval):
+        """同一 key 每 interval 秒最多输出一条，下一条附带期间被压掉的条数"""
+        now = time.time()
+        last, suppressed = self._log_throttle.get(key, (0.0, 0))
+        if last and now - last < interval:
+            self._log_throttle[key] = (last, suppressed + 1)
+            return
+        self._log_throttle[key] = (now, 0)
+        if suppressed:
+            message = f'{message}（期间抑制 {suppressed} 条）'
+        log_fn(message)
 
     def send_ack_response(self, original_message, status, error, body):
         """

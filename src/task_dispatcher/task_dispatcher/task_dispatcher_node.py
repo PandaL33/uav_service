@@ -55,6 +55,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger('task_dispatcher')
 
+_LOG_THROTTLE = {}  # key -> [上次输出时刻, 期间抑制条数]
+
+
+def log_throttled(key, log_fn, message, interval=1.0):
+    """限频日志：同一 key 最多每 interval 秒输出一条，并附带期间被压掉的条数。"""
+    now = time.time()
+    state = _LOG_THROTTLE.setdefault(key, [0.0, 0])
+    if now - state[0] < interval:
+        state[1] += 1
+        return
+    suppressed = state[1]
+    state[1] = 0
+    state[0] = now
+    if suppressed > 0:
+        message = f'{message} (期间抑制 {suppressed} 条)'
+    log_fn(message)
+
 
 def disable_default_qos_event_callbacks(node):
     """
@@ -648,7 +665,7 @@ class TaskDispatcherNode(Node):
         检查MQTT连接状态，确保连接正常
         """
         if not self.mqtt_connected:
-            logger.warning('MQTT连接已断开，尝试重新连接...')
+            log_throttled('mqtt_disconnected', logger.warning, 'MQTT连接已断开，尝试重新连接...', 10.0)
             # 如果连接断开，启动新的连接线程
             if not self.mqtt_thread.is_alive():
                 self.mqtt_thread = Thread(target=self.connect_mqtt, daemon=True)
@@ -657,7 +674,7 @@ class TaskDispatcherNode(Node):
         """
         检查无人机设备故障信息
         """
-        logger.info('检查无人机设备故障信息')
+        log_throttled('uav_fault_check', logger.info, '检查无人机设备故障信息', 30.0)
         if self.ros_topic_subscriber._enable_status_report:
             self.uav_fault_inspection = True
             check_code, report = self.preflight_check_node._start_check()
