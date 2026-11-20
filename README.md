@@ -1079,3 +1079,110 @@ colcon build --paths rkdrone_third_party_pkgs/uav_service/src/robot_interface rk
   更新方式：`git submodule update --remote uav_service`。
 - 依赖准备：`bash scripts/setup_offline_sim_env.sh`（只装 paho/gpiod/cv2 等本机缺失项，
   不构建接口包）。
+
+# 建图任务（BuildMap）流程与断点补跑
+
+## 1. 建图任务流程
+
+1. 平台通过 MQTT 下发 `BuildMap`，`map_manager.build_map()` 创建**本地任务 ID**
+   `buildmap_<YYYYmmdd_HHMMSS>_<uuid8>`（不沿用平台 taskId），起线程执行并先回 ACK，
+   ACK 与最终 `BuildMap` 报文里的 `taskId` 均为该本地 ID。
+2. `point_cloud_manager._processing_uav_task()` 启动 `build_map_drone.service`（建图模式，
+   不运行 ego_planner），随后轮询等待**解锁起飞 → 降落**。该阶段是人工飞行，没有航点概念。
+3. 降落后调用 Super-LIO 的 `/map_save`，合并 `PCD/scans_*.pcd` 输出
+   `$HOME/slam_data/pcd/test.pcd`（开启动态剔除时另存 `test_ori.pcd`）。
+4. 读取 `task_dispatcher/config.py` 中的 `PCD_FILE_PATH`，执行 0.25 米体素下采样 → 裁剪 →
+   自动 z 裁剪 → 生成栅格图 `~/slam_data/map.png`，压缩点云写入 `PCD_FILE_COMPRESS_PATH`。
+5. 依次上传 png（`fileId`）与 pcd（`pcdFileId`）。
+6. `MapManager.save_map()` 发送 `BuildMap type=1 status=200`（含 `taskId/fileId/pcdFileId/
+   picBase64/mapWidth/mapHeight/originPoint`），停止服务，任务置 `completed`。
+
+> **HOME 不一致是常见事故点**：`PCD_FILE_PATH` 的 `~` 由 task_dispatcher 进程展开，
+> 而 Super-LIO 用 `getenv("HOME")` 展开。两者用户不同时会读不到 `test.pcd`。
+
+## 2. 失败判定
+
+旧逻辑在点云缺失时只打 `点云文件不存在` 日志并返回空 `file_id`，`save_map()` 静默跳过，
+最终仍打印“地图构建任务完成”并置 `completed`。
+
+现在的行为：
+
+- `process_point_cloud_data()` 返回空 `file_id` 时，`_processing_uav_task()` 抛出
+  `RuntimeError`（提示检查 LIO 保存路径与 `PCD_FILE_PATH`），并在 `finally` 中停止服务、重置状态；
+- `_async_build_map()` 捕获后上报 `BuildMap status=400`，并把任务置为 `failed`，不再误判完成。
+
+该修复需要重新 `colcon build --packages-select task_dispatcher` 并重启服务后生效。
+
+## 3. 断点补跑：resume_build_map.py
+
+适用场景：飞行与 `/map_save` 已完成，仅“后处理 + 上传 + 上报”缺失（如上面的路径问题）。
+脚本只执行流程中的第 4~6 步，**不重启 LIO、不重飞、不调用 `/map_save`**。
+
+### 前提
+
+- 已 `source /opt/ros/humble/setup.bash` 与工作空间 `install/setup.bash`
+  （脚本会导入 `point_cloud_manager`，依赖 rclpy/open3d）；
+- 待处理的 pcd 已在机器人本地且当前用户可读（Windows 上的文件需先 `scp` 到机器人）；
+- 平台侧该任务尚未被判定关闭，否则补发的 200 可能不被接受，需要在平台重开或重新下发任务；
+- pcd 必须是 `/map_save` 合并后的世界系点云；若只剩 `PCD/scans_*.pcd` 分片，需先离线合并。
+
+> Super-LIO 每次启动都会删除旧的 `PCD/scans_*.pcd`，出现中断后不要重启 LIO，尽快补跑。
+
+### 用法
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/cat/git/xtd2_ws/install/setup.bash
+cd /home/cat/git/xtd2_ws/XTDrone2_ego_planner/rkdrone_third_party_pkgs/uav_service/src/task_dispatcher
+
+# 演练：真实出图并打印报文，但不上传、不发布
+python3 -m task_dispatcher.resume_build_map \
+  --task-id buildmap_20261120_160548_8c01a2d4 \
+  --pcd /home/cat/slam_data/pcd/test_jfwh.pcd \
+  --broker <mqtt-broker> --port 10883 \
+  --username <mqtt-user> --password '<mqtt-password>' \
+  --response-topic /robot/up --sn UAV00003 \
+  --server-url https://<platform-host> \
+  --dry-run
+
+# 确认 ~/slam_data/map.png 正常后，去掉 --dry-run 正式补报
+```
+
+已经单独上传过文件、只差上报时，可直接复用文件 ID：
+
+```bash
+python3 -m task_dispatcher.resume_build_map --task-id <buildmap_id> \
+  --pcd-file-id <pcdFileId> --file-id <fileId>
+```
+
+### 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--task-id` | 必填 | 原任务的本地 ID（日志中的 `buildmap_*`），作为 `BuildMap.body.taskId` |
+| `--pcd` | `config.PCD_FILE_PATH` | 原始点云路径 |
+| `--image` | `~/slam_data/map.png` | 栅格图输出/复用路径 |
+| `--pcd-file-id` | 空 | 复用已上传的 pcd 文件 ID，跳过 pcd 上传 |
+| `--file-id` | 空 | 复用已上传的 png 文件 ID，跳过 png 上传 |
+| `--broker/--port/--username/--password` | 端点配置 | MQTT 连接参数 |
+| `--response-topic` | `/robot/up` | 上行主题 |
+| `--sn/--version` | 端点配置 | 机器人序列号与版本 |
+| `--server-url` | 端点配置 | 平台地址，用于取上传 token 与文件上传 |
+| `--dry-run` | 关闭 | 只出图并打印报文（不含 `picBase64`），不上传不发布 |
+
+MQTT/服务器参数的默认值按与 launch 相同的顺序读取端点覆盖文件：
+`UAV_ENDPOINT_CONFIG` → `<uav_service>/endpoint.local.json` → `~/.uav_service/endpoint.json`，
+都未找到时使用内置默认值，可用命令行参数逐项覆盖。
+
+### 验证
+
+- dry-run：`~/slam_data/map.png` 能打开且轮廓与场地一致，报文内 `mapWidth/mapHeight`、
+  `originPoint` 正常；
+- 正式执行：日志出现 `已上报 BuildMap(200)`，平台侧该任务收到完成状态与地图文件；
+- 若报 `获取上传 token 失败`，先确认机器人可访问 `--server-url` 与 MQTT 端口。
+
+### 注意
+
+- 用运行 task_dispatcher 的同一用户执行，避免 `~` 展开到不同目录；
+- 不要在补跑前重启 `build_map_drone.service` / LIO；
+- 脚本对 `PCD_FILE_COMPRESS_PATH` 与 `--image` 的上级目录会自动创建。
