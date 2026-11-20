@@ -1097,11 +1097,13 @@ colcon build --paths rkdrone_third_party_pkgs/uav_service/src/robot_interface rk
 6. `MapManager.save_map()` 发送 `BuildMap type=1 status=200`（含 `taskId/fileId/pcdFileId/
    picBase64/mapWidth/mapHeight/originPoint`），停止服务，任务置 `completed`。
 
-> **单位约定（平台按米存储）**：`mapWidth/mapHeight` 是地图**物理尺寸**，不是图像像素数；
-> `originPoint.x/y` 是世界原点距图像左/下边界的距离，单位同样是米。像素数与分辨率只用于本地日志核对：
-> `mapWidth = x_max - x_min`、`mapHeight = y_max - y_min`、`originPoint = (-x_min, -y_min)`，
-> 其中 `cell_size` 默认 0.05 m（栅格过大时会被自动放大，实际值以日志为准）。
-> 传像素数会让平台把 5647×2516 px 显示成“5647 米 × 2516 米”。
+> **单位约定（实测）**：两个字段单位不同，混用会导致平台显示错误。
+> - `mapWidth/mapHeight` 是**物理尺寸（米）**：`x_max - x_min`、`y_max - y_min`。
+>   传像素数会让平台把 5647×2516 px 显示成“5647 米 × 2516 米”。
+> - `originPoint.x/y` 是**图像像素坐标**（列、行，行从图像下边界往上数）：
+>   `(-x_min)/cell_size`、`(-y_min)/cell_size`。传米会让原点标记跑到图像左下角。
+>
+> `cell_size` 默认 0.05 m（栅格过大时会被自动放大，实际值以日志为准）。
 
 > **HOME 不一致是常见事故点**：`PCD_FILE_PATH` 的 `~` 由 task_dispatcher 进程展开，
 > 而 Super-LIO 用 `getenv("HOME")` 展开。两者用户不同时会读不到 `test.pcd`。
@@ -1162,7 +1164,7 @@ python3 -m task_dispatcher.resume_build_map --task-id <buildmap_id> \
 ```
 
 `--file-id/--pcd-file-id` 只跳过**上传**：脚本仍会用 `--pcd` 重算栅格图、
-`mapWidth/mapHeight` 与 `originPoint`（单位均为米），避免上报 `(0,0)` 或像素数导致平台显示错误。
+`mapWidth/mapHeight`（米）与 `originPoint`（像素），避免上报 `(0,0)` 或单位错误。
 因此补跑必须能读到点云，缺 `--pcd` 时脚本直接报错退出。
 
 ### 参数

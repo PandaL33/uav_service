@@ -135,7 +135,7 @@ class PointCloudManager:
 
         try:
             # 处理点云数据
-            file_id, origin_x, origin_y, width_m, height_m = self.process_point_cloud_data()
+            file_id, col_radar, row_radar, width_m, height_m = self.process_point_cloud_data()
             if not file_id:
                 raise RuntimeError(
                     f"点云数据处理失败，未生成有效点云文件（请检查 LIO 保存路径与 PCD_FILE_PATH 是否一致）: {PCD_FILE_PATH}"
@@ -152,7 +152,7 @@ class PointCloudManager:
         logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
         # self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
 
-        return file_id, origin_x, origin_y, width_m, height_m
+        return file_id, col_radar, row_radar, width_m, height_m
 
     def reset_status(self):
         """
@@ -362,30 +362,28 @@ class PointCloudManager:
         img.save(output_img)
         logger.info(f"图像已保存至：{output_img}")
 
-        # 10. 计算地图物理尺寸与世界原点偏移
-        #     平台按米存储 mapWidth/mapHeight，originPoint 也是米，因此这里直接给出物理量：
-        #       mapWidth  = x_max - x_min
-        #       mapHeight = y_max - y_min
-        #       originPoint.x = 世界原点距图像左边界的距离 = 0 - x_min
-        #       originPoint.y = 世界原点距图像下边界的距离 = 0 - y_min
+        # 10. 计算上报字段
+        #     平台约定（实测）：
+        #       mapWidth/mapHeight 单位是米  -> x_max - x_min / y_max - y_min
+        #       originPoint 单位是像素，行从图像下边界往上数
+        #                     -> col = (0 - x_min) / cell_size, row = (0 - y_min) / cell_size
         radar_x, radar_y, radar_z = radar_point
-        origin_x = radar_x - x_min
-        origin_y = radar_y - y_min
+        col_radar = (radar_x - x_min) / cell_size
+        row_radar = (radar_y - y_min) / cell_size
         width_m = x_max - x_min
         height_m = y_max - y_min
-        col_radar = origin_x / cell_size
-        row_radar = origin_y / cell_size
         logger.info(f"地图物理尺寸: {width_m:.2f} m x {height_m:.2f} m "
                     f"(图像 {n_cols}x{n_rows} 像素, cell_size={cell_size:.4f} m)")
-        logger.info(f"世界原点 ({radar_x}, {radar_y}, {radar_z}) 距图像左/下边界: "
-                    f"x={origin_x:.2f} m, y={origin_y:.2f} m (像素 col={col_radar:.2f}, row={row_radar:.2f})")
+        logger.info(f"世界原点 ({radar_x}, {radar_y}, {radar_z}) 的图像坐标: "
+                    f"col={col_radar:.2f}, row={row_radar:.2f} (行从下边界起)")
 
         if 0 <= col_radar < n_cols and 0 <= row_radar < n_rows:
             logger.info("  世界原点位于图像内部。")
         else:
             logger.info("  世界原点位于图像外部。")
 
-        return True, origin_x, origin_y, width_m, height_m
+        return True, col_radar, row_radar, width_m, height_m
+
     def process_point_cloud_data(self):
         '''
         处理点云数据，上传到文件服务器
@@ -454,7 +452,7 @@ class PointCloudManager:
             # pcd = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.02, y_ratio=0.02, z_ratio=0.0)
             logger.info("开始执行点云文件截图")
             raster = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.0, y_ratio=0.0, z_ratio=0.35)
-            png_res, origin_x, origin_y, width_m, height_m = self.pcd_to_raster(
+            png_res, col_radar, row_radar, width_m, height_m = self.pcd_to_raster(
                 raster, f"{os.path.expanduser('~')}/slam_data/map.png")
             if png_res == False:
                 logger.error(f"点云文件截图失败,退出建图流程.")
@@ -489,7 +487,7 @@ class PointCloudManager:
                 # 删除记录
                 self.point_cloud_persistor._remove_record(record.get('id'))
                 logger.info(f'已删除点云记录: {record.get("id")}')
-                return file_id, origin_x, origin_y, width_m, height_m
+                return file_id, col_radar, row_radar, width_m, height_m
             else:
                 logger.error("点云文件上传失败，已达到最大重试次数")  
                 # 上传失败，将记录状态更新回pending，以便定时器在网络恢复后重新尝试

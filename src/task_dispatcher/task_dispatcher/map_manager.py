@@ -586,10 +586,10 @@ class MapManager:
 
                 self.task_id = task_id
 
-                pcd_file_id, origin_x, origin_y, map_width_m, map_height_m = \
+                pcd_file_id, col_radar, row_radar, map_width_m, map_height_m = \
                     self.point_cloud_manager._processing_uav_task(task_id)
 
-                self.save_map(pcd_file_id, origin_x, origin_y, map_width_m, map_height_m)
+                self.save_map(pcd_file_id, col_radar, row_radar, map_width_m, map_height_m)
             
 
             else:
@@ -816,13 +816,13 @@ class MapManager:
             # 异常情况下也生成一个模拟的fileId
             return ''
 
-    def save_map(self, pcd_file_id, origin_x=0.0, origin_y=0.0, map_width_m=0.0, map_height_m=0.0):
+    def save_map(self, pcd_file_id, col_radar=0.0, row_radar=0.0, map_width_m=0.0, map_height_m=0.0):
         """
         保存地图并上报。
 
-        origin_x/origin_y: 世界原点距图像左/下边界的距离（米）
-        map_width_m/map_height_m: 地图物理尺寸（米）。平台按米存储 mapWidth/mapHeight，
-        不能传图像像素数，否则平台会把“米”显示成像素值。
+        平台字段单位（实测）：
+        - mapWidth/mapHeight: 地图物理尺寸（米），不能传像素数；
+        - originPoint.x/y: 世界原点在图像中的像素坐标，行从图像下边界往上数。
         """
         if pcd_file_id == '':
             logger.warning(f"pcd_file_id为空,跳过二维地图保存步骤.")
@@ -873,8 +873,8 @@ class MapManager:
                 'mapWidth': map_width_m,
                 'mapHeight': map_height_m,
                 'originPoint': {
-                    'x': origin_x,
-                    'y': origin_y,
+                    'x': col_radar,
+                    'y': row_radar,
                     'z': 0.0,
                     'w': 0.0
                 }

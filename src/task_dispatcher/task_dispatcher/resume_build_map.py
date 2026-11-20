@@ -124,7 +124,7 @@ def build_png_and_pcd(pcd_path, image_path):
 
     os.makedirs(os.path.dirname(image_path) or '.', exist_ok=True)
     # pcd_to_raster 不依赖实例状态，这里直接以无实例方式调用，避免构造完整 ROS 管理器
-    ok, origin_x, origin_y, width_m, height_m = PointCloudManager.pcd_to_raster(None, raster, image_path)
+    ok, col_radar, row_radar, width_m, height_m = PointCloudManager.pcd_to_raster(None, raster, image_path)
     if not ok:
         raise SystemExit('点云栅格化失败，未生成地图图片')
 
@@ -132,8 +132,8 @@ def build_png_and_pcd(pcd_path, image_path):
     o3d.io.write_point_cloud(PCD_FILE_COMPRESS_PATH, pcd)
     logger.info('压缩点云已保存: %s', PCD_FILE_COMPRESS_PATH)
 
-    # 返回平台需要的物理量（米）：世界原点距图像左/下边界、地图宽高
-    return origin_x, origin_y, width_m, height_m
+    # 返回上报字段：世界原点像素坐标(col,row，行从下边界起) 与地图物理宽高（米）
+    return col_radar, row_radar, width_m, height_m
 
 
 def upload_file(upload_url, file_path, filename, content_type, timeout):
@@ -280,16 +280,16 @@ def main():
     if not args.username:
         logger.warning('未提供 MQTT 用户名，若 broker 开启鉴权会连接被拒（rc=4/5）')
 
-    # 平台的 mapWidth/mapHeight/originPoint 单位都是米，只能由点云重算。
+    # mapWidth/mapHeight（米）与 originPoint（像素）都必须由点云重算。
     # 复用 fileId/pcdFileId 只跳过上传，不能跳过处理，否则尺寸与原点会退化。
     if not os.path.isfile(args.pcd):
         raise SystemExit(f'点云文件不存在: {args.pcd}（mapWidth/originPoint 必须由点云计算）')
-    origin_x, origin_y, map_width, map_height = build_png_and_pcd(args.pcd, args.image)
+    col_radar, row_radar, map_width, map_height = build_png_and_pcd(args.pcd, args.image)
     if args.file_id:
         logger.warning('已按点云重算 %s，但复用旧 fileId=%s，请确认平台上的图与本地一致',
                        args.image, args.file_id)
-    logger.info('地图物理尺寸: %.2f x %.2f 米, originPoint: (%.2f, %.2f) 米',
-                map_width, map_height, origin_x, origin_y)
+    logger.info('地图物理尺寸: %.2f x %.2f 米, originPoint: (%.2f, %.2f) 像素',
+                map_width, map_height, col_radar, row_radar)
 
     auth = None if args.dry_run else AuthManager(args.server_url)
 
@@ -334,8 +334,8 @@ def main():
         'mapWidth': map_width,
         'mapHeight': map_height,
         'originPoint': {
-            'x': origin_x,
-            'y': origin_y,
+            'x': col_radar,
+            'y': row_radar,
             'z': 0.0,
             'w': 0.0,
         },
