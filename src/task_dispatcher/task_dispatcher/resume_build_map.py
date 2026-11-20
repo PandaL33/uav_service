@@ -28,6 +28,7 @@ MQTT/服务器参数默认读取与 launch 相同的端点覆盖文件
 
 import argparse
 import base64
+import io
 import json
 import logging
 import os
@@ -58,6 +59,42 @@ from task_dispatcher.point_cloud_manager import PointCloudManager  # noqa: E402
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger('task_dispatcher.resume_build_map')
+
+# broker 单包上限约 1MB，超出会被直接断开（CONN_LOST），留 100KB 余量
+MQTT_MAX_PAYLOAD = 900 * 1024
+
+
+def encode_map_image(image_path, overhead_bytes, max_payload=MQTT_MAX_PAYLOAD):
+    """生成 picBase64，必要时压缩以适配 MQTT 单包上限，保持像素尺寸不变。
+
+    返回 (base64 字符串, 说明)。无法压到上限内时返回空字符串。
+    """
+    def _fits(data):
+        return len(base64.b64encode(data)) + overhead_bytes <= max_payload
+
+    with open(image_path, 'rb') as fp:
+        raw = fp.read()
+    if _fits(raw):
+        return base64.b64encode(raw).decode(), '原始 PNG'
+
+    with Image.open(image_path) as img:
+        buf = io.BytesIO()
+        img.save(buf, format='PNG', optimize=True)
+        if _fits(buf.getvalue()):
+            return base64.b64encode(buf.getvalue()).decode(), 'PNG optimize 重编码'
+
+        gray = img.convert('L')
+        buf = io.BytesIO()
+        gray.save(buf, format='PNG', optimize=True)
+        if _fits(buf.getvalue()):
+            return base64.b64encode(buf.getvalue()).decode(), '灰度 PNG'
+
+        buf = io.BytesIO()
+        gray.quantize(colors=8).save(buf, format='PNG', optimize=True)
+        if _fits(buf.getvalue()):
+            return base64.b64encode(buf.getvalue()).decode(), '8 色灰度 PNG'
+
+    return '', '超过 MQTT 单包上限，picBase64 置空（平台可按 fileId 取图）'
 
 # 与 launch/task_dispatcher.launch.py 的内置默认值保持一致，实际值由端点覆盖文件提供
 DEFAULTS = {
@@ -286,8 +323,6 @@ def main():
     else:
         logger.info('复用已有 png/pcd 文件 ID，跳过点云处理: %s', args.image)
 
-    with open(args.image, 'rb') as fp:
-        image_base64 = base64.b64encode(fp.read()).decode('utf-8')
     with Image.open(args.image) as img:
         map_width, map_height = img.size
 
@@ -329,7 +364,7 @@ def main():
         'progress': 100,
         'fileId': file_id,
         'pcdFileId': pcd_file_id,
-        'picBase64': image_base64,
+        'picBase64': '',
         'marks': [],
         'mapWidth': map_width,
         'mapHeight': map_height,
@@ -340,6 +375,14 @@ def main():
             'w': 0.0,
         },
     }
+
+    overhead = len(json.dumps({
+        'sn': args.sn, 'ver': args.version, 'seq': '0' * 32,
+        'type': 1, 'ts': 0, 'cmd': 'BuildMap', 'status': 200,
+        'error': 'ok', 'body': body,
+    }, ensure_ascii=False))
+    body['picBase64'], image_note = encode_map_image(args.image, overhead)
+    logger.info('picBase64 处理方式: %s（图片 %d 字节）', image_note, os.path.getsize(args.image))
 
     if args.dry_run:
         printable = dict(body)
