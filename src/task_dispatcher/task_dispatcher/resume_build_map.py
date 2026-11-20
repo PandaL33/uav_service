@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 
@@ -147,6 +148,8 @@ def upload_file(upload_url, file_path, filename, content_type, timeout):
     file_id = (result.get('data') or {}).get('id', '')
     if not file_id:
         logger.error('上传响应中未找到 data.id: %s', result)
+    else:
+        logger.info('上传成功: %s -> fileId=%s', file_path, file_id)
     return file_id
 
 
@@ -167,13 +170,44 @@ def publish_build_map(args, body):
     client = mqtt.Client(client_id=f'resume_build_map_{uuid.uuid4().hex[:8]}')
     if args.username and args.password:
         client.username_pw_set(args.username, args.password)
+
+    connected = threading.Event()
+    conn_result = {'rc': None}
+
+    def _rc_value(reason_code):
+        # paho 2.x 传 ReasonCode，paho 1.x 传 int
+        return getattr(reason_code, 'value', reason_code)
+
+    def on_connect(_client, _userdata, _flags, reason_code, *extra):
+        code = _rc_value(reason_code)
+        conn_result['rc'] = code
+        if code == 0:
+            connected.set()
+        else:
+            logger.error('MQTT 连接被拒绝，rc=%s（4=用户名或密码错误，5=未授权）', code)
+
+    def on_disconnect(_client, _userdata, *extra):
+        logger.warning('MQTT 连接断开: %s', extra)
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+
     client.connect(args.broker, args.port, 60)
     client.loop_start()
     try:
-        info = client.publish(args.response_topic, json.dumps(message), qos=1)
+        if not connected.wait(timeout=15):
+            raise RuntimeError(
+                f'MQTT 连接失败（{args.broker}:{args.port}, rc={conn_result["rc"]}），'
+                '请检查 broker/端口是否正确、用户名密码是否传入'
+            )
+        # 与 task_dispatcher 一致使用 QoS 0，避免依赖 broker 的 PUBACK
+        info = client.publish(args.response_topic, json.dumps(message), qos=0)
         info.wait_for_publish(timeout=10)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(f'BuildMap 消息发布失败, rc={info.rc}')
         if not info.is_published():
             raise RuntimeError('BuildMap 消息发布超时')
+        time.sleep(0.5)
     finally:
         client.loop_stop()
         client.disconnect()
@@ -211,6 +245,11 @@ def main():
     )
     args = parse_args()
     args.server_url = args.server_url.rstrip('/')
+    logger.info('MQTT: %s:%s (user=%s) sn=%s topic=%s server=%s',
+                args.broker, args.port, args.username or '<empty>',
+                args.sn, args.response_topic, args.server_url)
+    if not args.username:
+        logger.warning('未提供 MQTT 用户名，若 broker 开启鉴权会连接被拒（rc=4/5）')
 
     col_radar, row_radar = 0.0, 0.0
     if not (args.pcd_file_id and args.file_id and os.path.isfile(args.image)):
