@@ -135,7 +135,7 @@ class PointCloudManager:
 
         try:
             # 处理点云数据
-            file_id, col_radar, row_radar = self.process_point_cloud_data()
+            file_id, origin_x, origin_y, width_m, height_m = self.process_point_cloud_data()
             if not file_id:
                 raise RuntimeError(
                     f"点云数据处理失败，未生成有效点云文件（请检查 LIO 保存路径与 PCD_FILE_PATH 是否一致）: {PCD_FILE_PATH}"
@@ -152,7 +152,7 @@ class PointCloudManager:
         logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
         # self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
 
-        return file_id, col_radar, row_radar
+        return file_id, origin_x, origin_y, width_m, height_m
 
     def reset_status(self):
         """
@@ -191,7 +191,7 @@ class PointCloudManager:
         points = np.asarray(pcd.points)
         if points.shape[0] == 0:
             logger.info("点云为空")
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0, 0.0, 0.0
 
         x = points[:, 0]
         y = points[:, 1]
@@ -215,7 +215,7 @@ class PointCloudManager:
             
         if len(x) == 0:
             logger.error("所有点均为异常点，过滤后点云为空")
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0, 0.0, 0.0
 
         # 2. 确定投影范围
         if x_range is None:
@@ -285,7 +285,7 @@ class PointCloudManager:
 
         if len(z_valid) == 0:
             logger.info("没有点在投影范围内")
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0, 0.0, 0.0
 
         # 5. 聚合计算平均高度
         # 注意：此时 n_cols*n_rows 已经被上面的安全检查限制在安全范围内
@@ -308,7 +308,7 @@ class PointCloudManager:
         z_vals = avg_z[mask]
         if len(z_vals) == 0:
             logger.info("没有有效栅格")
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0, 0.0, 0.0
             
         z_min_global = z_vals.min()
         z_max_global = z_vals.max()
@@ -362,24 +362,30 @@ class PointCloudManager:
         img.save(output_img)
         logger.info(f"图像已保存至：{output_img}")
 
-        # 10. 计算雷达点图像坐标
+        # 10. 计算地图物理尺寸与世界原点偏移
+        #     平台按米存储 mapWidth/mapHeight，originPoint 也是米，因此这里直接给出物理量：
+        #       mapWidth  = x_max - x_min
+        #       mapHeight = y_max - y_min
+        #       originPoint.x = 世界原点距图像左边界的距离 = 0 - x_min
+        #       originPoint.y = 世界原点距图像下边界的距离 = 0 - y_min
         radar_x, radar_y, radar_z = radar_point
-        col_radar = (radar_x - x_min) / cell_size
-        row_radar = (radar_y - y_min) / cell_size
-        grid_x = col_radar * cell_size
-        grid_y = row_radar * cell_size
-        logger.info(f"雷达点 ({radar_x}, {radar_y}, {radar_z}) 的图像坐标：")
-        logger.info(f"  列 (col) = {col_radar:.2f}  (从左到右)")
-        logger.info(f"  行 (row) = {row_radar:.2f}  (从下到上)")
-        logger.info(f"  grid_x = {grid_x:.2f}  (从左到右)")
-        logger.info(f"  grid_y = {grid_y:.2f}  (从下到上)")
+        origin_x = radar_x - x_min
+        origin_y = radar_y - y_min
+        width_m = x_max - x_min
+        height_m = y_max - y_min
+        col_radar = origin_x / cell_size
+        row_radar = origin_y / cell_size
+        logger.info(f"地图物理尺寸: {width_m:.2f} m x {height_m:.2f} m "
+                    f"(图像 {n_cols}x{n_rows} 像素, cell_size={cell_size:.4f} m)")
+        logger.info(f"世界原点 ({radar_x}, {radar_y}, {radar_z}) 距图像左/下边界: "
+                    f"x={origin_x:.2f} m, y={origin_y:.2f} m (像素 col={col_radar:.2f}, row={row_radar:.2f})")
 
         if 0 <= col_radar < n_cols and 0 <= row_radar < n_rows:
-            logger.info("  该点位于图像内部。")
+            logger.info("  世界原点位于图像内部。")
         else:
-            logger.info("  该点位于图像外部。")
+            logger.info("  世界原点位于图像外部。")
 
-        return True, col_radar, row_radar
+        return True, origin_x, origin_y, width_m, height_m
     def process_point_cloud_data(self):
         '''
         处理点云数据，上传到文件服务器
@@ -399,7 +405,7 @@ class PointCloudManager:
             # 2. 等待服务可用
             if not self.map_save_client.wait_for_service(timeout_sec=5.0):
                 logger.error("点云保存服务 /map_save 不可用")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             
             # 3. 创建请求并调用服务
             request = Trigger.Request()
@@ -416,7 +422,7 @@ class PointCloudManager:
             #检查是否超时
             if not future.done():
                 logger.error(f"点云保存服务调用超时（{service_timeout}秒）")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             
             # 5. 检查服务调用结果
             if future.result():
@@ -424,20 +430,20 @@ class PointCloudManager:
                     logger.info("点云保存成功")
                 else:
                     logger.error(f"点云保存失败: {future.result().message}")
-                    return '', 0.0, 0.0
+                    return '', 0.0, 0.0, 0.0, 0.0
             else:
                 logger.error("点云保存服务调用失败")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             
             # 6. 检查点云文件是否存在
             pcd_file_path = PCD_FILE_PATH
             if not os.path.exists(pcd_file_path):
                 logger.error(f"点云文件不存在: {pcd_file_path}")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             pcd = o3d.io.read_point_cloud(pcd_file_path)
             if pcd.is_empty():
                 logger.info("点云读取后为空")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             
             logger.info("点云数据压缩(采样-滤波)")
             pcd = self.fast_downsample(pcd, voxel_size=0.25, filter_params={'nb_neighbors':20, 'std_ratio':2.0})
@@ -448,10 +454,11 @@ class PointCloudManager:
             # pcd = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.02, y_ratio=0.02, z_ratio=0.0)
             logger.info("开始执行点云文件截图")
             raster = self.point_cloud_crop.auto_crop_pointcloud(pcd, x_ratio=0.0, y_ratio=0.0, z_ratio=0.35)
-            png_res, col_radar, row_radar = self.pcd_to_raster(raster, f"{os.path.expanduser('~')}/slam_data/map.png")
+            png_res, origin_x, origin_y, width_m, height_m = self.pcd_to_raster(
+                raster, f"{os.path.expanduser('~')}/slam_data/map.png")
             if png_res == False:
                 logger.error(f"点云文件截图失败,退出建图流程.")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
             
             result_pcd = pcd
             
@@ -482,17 +489,17 @@ class PointCloudManager:
                 # 删除记录
                 self.point_cloud_persistor._remove_record(record.get('id'))
                 logger.info(f'已删除点云记录: {record.get("id")}')
-                return file_id, col_radar, row_radar
+                return file_id, origin_x, origin_y, width_m, height_m
             else:
                 logger.error("点云文件上传失败，已达到最大重试次数")  
                 # 上传失败，将记录状态更新回pending，以便定时器在网络恢复后重新尝试
                 self.point_cloud_persistor._update_record_status(record.get('id'), 'pending')
                 logger.info(f"点云记录状态已更新为待上传，记录ID: {record.get('id')}")
-                return '', 0.0, 0.0
+                return '', 0.0, 0.0, 0.0, 0.0
                 
         except Exception as e:
             logger.error(f"处理点云数据时出错: {str(e)}")
-            return '', 0.0, 0.0
+            return '', 0.0, 0.0, 0.0, 0.0
 
     
     def _check_network_connection(self):

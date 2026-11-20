@@ -39,7 +39,6 @@ import open3d as o3d
 import paho.mqtt.client as mqtt
 import requests
 import urllib3
-from PIL import Image
 
 # 兼容两种运行方式：
 #   1) python3 -m task_dispatcher.resume_build_map
@@ -125,7 +124,7 @@ def build_png_and_pcd(pcd_path, image_path):
 
     os.makedirs(os.path.dirname(image_path) or '.', exist_ok=True)
     # pcd_to_raster 不依赖实例状态，这里直接以无实例方式调用，避免构造完整 ROS 管理器
-    ok, col_radar, row_radar = PointCloudManager.pcd_to_raster(None, raster, image_path)
+    ok, origin_x, origin_y, width_m, height_m = PointCloudManager.pcd_to_raster(None, raster, image_path)
     if not ok:
         raise SystemExit('点云栅格化失败，未生成地图图片')
 
@@ -133,7 +132,8 @@ def build_png_and_pcd(pcd_path, image_path):
     o3d.io.write_point_cloud(PCD_FILE_COMPRESS_PATH, pcd)
     logger.info('压缩点云已保存: %s', PCD_FILE_COMPRESS_PATH)
 
-    return col_radar, row_radar
+    # 返回平台需要的物理量（米）：世界原点距图像左/下边界、地图宽高
+    return origin_x, origin_y, width_m, height_m
 
 
 def upload_file(upload_url, file_path, filename, content_type, timeout):
@@ -280,23 +280,16 @@ def main():
     if not args.username:
         logger.warning('未提供 MQTT 用户名，若 broker 开启鉴权会连接被拒（rc=4/5）')
 
-    # originPoint 来自点云裁剪范围（世界原点落在栅格图中的列/行），只能由点云重算。
-    # 复用 fileId/pcdFileId 只跳过上传，不能跳过处理，否则 originPoint 会退化成 (0,0)，
-    # 平台侧的原点就会落到图像角落。
-    if os.path.isfile(args.pcd):
-        col_radar, row_radar = build_png_and_pcd(args.pcd, args.image)
-        if args.file_id:
-            logger.warning('已按点云重算 %s，但复用旧 fileId=%s，请确认平台上的图与本地一致',
-                           args.image, args.file_id)
-    elif args.file_id and args.pcd_file_id and os.path.isfile(args.image):
-        col_radar, row_radar = 0.0, 0.0
-        logger.warning('缺少点云 %s，无法计算 originPoint，本次将上报 (0,0)', args.pcd)
-    else:
-        raise SystemExit(f'点云文件不存在: {args.pcd}（且未提供可复用的 --file-id/--pcd-file-id）')
-    logger.info('originPoint(世界原点在图中的像素坐标): x=%.2f, y=%.2f', col_radar, row_radar)
-
-    with Image.open(args.image) as img:
-        map_width, map_height = img.size
+    # 平台的 mapWidth/mapHeight/originPoint 单位都是米，只能由点云重算。
+    # 复用 fileId/pcdFileId 只跳过上传，不能跳过处理，否则尺寸与原点会退化。
+    if not os.path.isfile(args.pcd):
+        raise SystemExit(f'点云文件不存在: {args.pcd}（mapWidth/originPoint 必须由点云计算）')
+    origin_x, origin_y, map_width, map_height = build_png_and_pcd(args.pcd, args.image)
+    if args.file_id:
+        logger.warning('已按点云重算 %s，但复用旧 fileId=%s，请确认平台上的图与本地一致',
+                       args.image, args.file_id)
+    logger.info('地图物理尺寸: %.2f x %.2f 米, originPoint: (%.2f, %.2f) 米',
+                map_width, map_height, origin_x, origin_y)
 
     auth = None if args.dry_run else AuthManager(args.server_url)
 
@@ -341,8 +334,8 @@ def main():
         'mapWidth': map_width,
         'mapHeight': map_height,
         'originPoint': {
-            'x': col_radar,
-            'y': row_radar,
+            'x': origin_x,
+            'y': origin_y,
             'z': 0.0,
             'w': 0.0,
         },

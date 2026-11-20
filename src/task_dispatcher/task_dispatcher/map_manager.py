@@ -586,9 +586,10 @@ class MapManager:
 
                 self.task_id = task_id
 
-                pcd_file_id, col_radar, row_radar = self.point_cloud_manager._processing_uav_task(task_id)
-                
-                self.save_map(pcd_file_id, col_radar, row_radar)
+                pcd_file_id, origin_x, origin_y, map_width_m, map_height_m = \
+                    self.point_cloud_manager._processing_uav_task(task_id)
+
+                self.save_map(pcd_file_id, origin_x, origin_y, map_width_m, map_height_m)
             
 
             else:
@@ -815,9 +816,13 @@ class MapManager:
             # 异常情况下也生成一个模拟的fileId
             return ''
 
-    def save_map(self, pcd_file_id, col_radar = 0.0, row_radar = 0.0):
+    def save_map(self, pcd_file_id, origin_x=0.0, origin_y=0.0, map_width_m=0.0, map_height_m=0.0):
         """
-        保存地图到指定路径
+        保存地图并上报。
+
+        origin_x/origin_y: 世界原点距图像左/下边界的距离（米）
+        map_width_m/map_height_m: 地图物理尺寸（米）。平台按米存储 mapWidth/mapHeight，
+        不能传图像像素数，否则平台会把“米”显示成像素值。
         """
         if pcd_file_id == '':
             logger.warning(f"pcd_file_id为空,跳过二维地图保存步骤.")
@@ -841,10 +846,13 @@ class MapManager:
             with open(map_image_path, 'rb') as f:
                 map_image_base64 = base64.b64encode(f.read()).decode('utf-8')
             
-            # 获取图像宽高
+            # 像素尺寸仅用于日志核对，上报给平台的是物理尺寸（米）
             with Image.open(map_image_path) as img:
-                map_width, map_height = img.size
-            logger.info(f'获取地图图像宽高成功: {map_width}x{map_height}')
+                img_width_px, img_height_px = img.size
+            if map_width_m <= 0 or map_height_m <= 0:
+                raise ValueError(f'地图物理尺寸无效: {map_width_m} x {map_height_m} m')
+            logger.info(f'地图图像 {img_width_px}x{img_height_px} 像素，'
+                        f'物理尺寸 {map_width_m:.2f}x{map_height_m:.2f} 米')
 
             file_id = self.upload_image_to_file_server(map_image_base64)
             if not file_id or file_id == '':
@@ -862,11 +870,11 @@ class MapManager:
                 'pcdFileId': pcd_file_id,
                 'picBase64': '',
                 'marks': [],  # 标注信息列表
-                'mapWidth': map_width,
-                'mapHeight': map_height,
+                'mapWidth': map_width_m,
+                'mapHeight': map_height_m,
                 'originPoint': {
-                    'x': col_radar,
-                    'y': row_radar,
+                    'x': origin_x,
+                    'y': origin_y,
                     'z': 0.0,
                     'w': 0.0
                 }
