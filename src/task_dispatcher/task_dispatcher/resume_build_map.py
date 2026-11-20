@@ -60,8 +60,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger('task_dispatcher.resume_build_map')
 
-# broker 单包上限约 1MB，超出会被直接断开（CONN_LOST），留 100KB 余量
-MQTT_MAX_PAYLOAD = 900 * 1024
+# broker 单包上限 1MB，超出会被直接断开（CONN_LOST），留少量余量
+MQTT_MAX_PAYLOAD = 1020 * 1024
 
 
 def encode_map_image(image_path, overhead_bytes, max_payload=MQTT_MAX_PAYLOAD):
@@ -78,21 +78,24 @@ def encode_map_image(image_path, overhead_bytes, max_payload=MQTT_MAX_PAYLOAD):
         return base64.b64encode(raw).decode(), '原始 PNG'
 
     with Image.open(image_path) as img:
-        buf = io.BytesIO()
-        img.save(buf, format='PNG', optimize=True)
-        if _fits(buf.getvalue()):
-            return base64.b64encode(buf.getvalue()).decode(), 'PNG optimize 重编码'
-
         gray = img.convert('L')
+
         buf = io.BytesIO()
         gray.save(buf, format='PNG', optimize=True)
         if _fits(buf.getvalue()):
             return base64.b64encode(buf.getvalue()).decode(), '灰度 PNG'
 
+        # 栅格图颜色很少，量化后无损压缩率更高；dither=0 避免抖动产生噪点
+        for colors in (8, 4, 2):
+            buf = io.BytesIO()
+            gray.quantize(colors=colors, dither=0).save(buf, format='PNG', optimize=True)
+            if _fits(buf.getvalue()):
+                return base64.b64encode(buf.getvalue()).decode(), f'{colors} 色灰度 PNG'
+
         buf = io.BytesIO()
-        gray.quantize(colors=8).save(buf, format='PNG', optimize=True)
+        gray.point(lambda v: 255 if v > 127 else 0, '1').save(buf, format='PNG', optimize=True)
         if _fits(buf.getvalue()):
-            return base64.b64encode(buf.getvalue()).decode(), '8 色灰度 PNG'
+            return base64.b64encode(buf.getvalue()).decode(), '二值 PNG'
 
     return '', '超过 MQTT 单包上限，picBase64 置空（平台可按 fileId 取图）'
 
