@@ -1155,6 +1155,10 @@ python3 -m task_dispatcher.resume_build_map --task-id <buildmap_id> \
   --pcd-file-id <pcdFileId> --file-id <fileId>
 ```
 
+`--file-id/--pcd-file-id` 只跳过**上传**：只要 `--pcd` 存在，脚本仍会用点云重算栅格图与
+`originPoint`（世界原点在图中的像素坐标），避免上报 `(0,0)` 让平台把原点画到图像角落。
+只有点云缺失且给了文件 ID 时才退化为 `(0,0)` 并在日志中告警。
+
 ### 参数
 
 | 参数 | 默认值 | 说明 |

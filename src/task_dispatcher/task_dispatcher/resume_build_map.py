@@ -280,11 +280,20 @@ def main():
     if not args.username:
         logger.warning('未提供 MQTT 用户名，若 broker 开启鉴权会连接被拒（rc=4/5）')
 
-    col_radar, row_radar = 0.0, 0.0
-    if not (args.pcd_file_id and args.file_id and os.path.isfile(args.image)):
+    # originPoint 来自点云裁剪范围（世界原点落在栅格图中的列/行），只能由点云重算。
+    # 复用 fileId/pcdFileId 只跳过上传，不能跳过处理，否则 originPoint 会退化成 (0,0)，
+    # 平台侧的原点就会落到图像角落。
+    if os.path.isfile(args.pcd):
         col_radar, row_radar = build_png_and_pcd(args.pcd, args.image)
+        if args.file_id:
+            logger.warning('已按点云重算 %s，但复用旧 fileId=%s，请确认平台上的图与本地一致',
+                           args.image, args.file_id)
+    elif args.file_id and args.pcd_file_id and os.path.isfile(args.image):
+        col_radar, row_radar = 0.0, 0.0
+        logger.warning('缺少点云 %s，无法计算 originPoint，本次将上报 (0,0)', args.pcd)
     else:
-        logger.info('复用已有 png/pcd 文件 ID，跳过点云处理: %s', args.image)
+        raise SystemExit(f'点云文件不存在: {args.pcd}（且未提供可复用的 --file-id/--pcd-file-id）')
+    logger.info('originPoint(世界原点在图中的像素坐标): x=%.2f, y=%.2f', col_radar, row_radar)
 
     with Image.open(args.image) as img:
         map_width, map_height = img.size
