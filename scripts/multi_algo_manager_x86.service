@@ -4,25 +4,25 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/public/lgl/ros2_ws
+User=cat
+WorkingDirectory=/home/cat/uav_service
 
 Environment="ROS_DOMAIN_ID=0"
 Environment="ROS_LOCALHOST_ONLY=0"
-Environment="ROS_LOG_DIR=/public/lgl/ros2_ws/logs"
-Environment="PYTHONPATH=/home/lgl/.local/lib/python3.8/site-packages"
+Environment="ROS_LOG_DIR=/home/cat/uav_service/logs"
+Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"
 # DDS 切换: 去掉注释即对本 unit 生效(默认保持注释 = 仍用 rmw_fastrtps_cpp), 改后需
 # sudo systemctl daemon-reload && sudo systemctl restart <本unit>。所有互相通信的进程与
-# 机器必须同步切换, 混用不会互通而是直接失联。本机(/public/lgl/ros2_ws)若无此 xml:
+# 机器必须同步切换, 混用不会互通而是直接失联。本机(/home/cat/uav_service)若无此 xml:
 # 先拷到本机并改绝对路径, URI 不展开变量。ExecStart 用 bash -c 也不会读 ~/.bashrc。
 # Environment="RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
 # Environment="CYCLONEDDS_URI=file:///home/cat/git/xtd2_ws/XTDrone2_ego_planner/rkdrone_launch/config/cyclonedds.xml"
 
 # 创建日志目录
-ExecStartPre=/bin/mkdir -p /public/lgl/ros2_ws/logs
+ExecStartPre=/bin/mkdir -p /home/cat/uav_service/logs
 
 # 启动 ROS2 节点，日志同时输出到 journal 和文件
-ExecStart=/bin/bash -lc "source /opt/ros/galactic/setup.bash && source install/setup.bash && ros2 launch multi_algo_manager multi_algo_manager.launch.py | tee -a /public/lgl/ros2_ws/logs/multi_algo_manager.log"
+ExecStart=/bin/bash -lc "source /opt/ros/galactic/setup.bash && source install/setup.bash && ros2 launch multi_algo_manager multi_algo_manager.launch.py | tee -a /home/cat/uav_service/logs/multi_algo_manager.log"
 
 Restart=always
 RestartSec=5
@@ -30,7 +30,7 @@ StandardOutput=journal+console
 StandardError=journal+console
 
 # 日志清理
-ExecStartPost=/bin/bash -c "find /public/lgl/ros2_ws/logs -name '*.log' -size +100M -delete && find /public/lgl/ros2_ws/logs -name '*.log.*' -mtime +7 -delete"
+ExecStartPost=/bin/bash -c "find /home/cat/uav_service/logs -name '*.log' -size +100M -delete && find /home/cat/uav_service/logs -name '*.log.*' -mtime +7 -delete"
 
 [Install]
 WantedBy=multi-user.target
