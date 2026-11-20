@@ -11,6 +11,12 @@ Environment="ROS_DOMAIN_ID=0"
 Environment="ROS_LOCALHOST_ONLY=0"
 Environment="ROS_LOG_DIR=/public/lgl/ros2_ws/logs"
 Environment="PYTHONPATH=/home/lgl/.local/lib/python3.8/site-packages"
+# DDS 切换: 去掉注释即对本 unit 生效(默认保持注释 = 仍用 rmw_fastrtps_cpp), 改后需
+# sudo systemctl daemon-reload && sudo systemctl restart <本unit>。所有互相通信的进程与
+# 机器必须同步切换, 混用不会互通而是直接失联。本机(/public/lgl/ros2_ws)若无此 xml:
+# 先拷到本机并改绝对路径, URI 不展开变量。ExecStart 用 bash -c 也不会读 ~/.bashrc。
+# Environment="RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
+# Environment="CYCLONEDDS_URI=file:///home/cat/git/xtd2_ws/XTDrone2_ego_planner/rkdrone_launch/config/cyclonedds.xml"
 
 # 创建日志目录
 ExecStartPre=/bin/mkdir -p /public/lgl/ros2_ws/logs
