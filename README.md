@@ -1187,6 +1187,8 @@ MQTT/服务器参数的默认值按与 launch 相同的顺序读取端点覆盖�
 - 用运行 task_dispatcher 的同一用户执行，避免 `~` 展开到不同目录；
 - 不要在补跑前重启 `build_map_drone.service` / LIO；
 - 脚本对 `PCD_FILE_COMPRESS_PATH` 与 `--image` 的上级目录会自动创建；
+- broker 单包上限为 1MB，报文超限会被直接断开（表现为 `MQTT_ERR_CONN_LOST`）。脚本会对
+  `picBase64` 做无抖动量化压缩（尺寸不变），仍压不进上限时置空，平台可按 `fileId` 取图；
 - 若日志出现 `MQTT 连接断开: MQTT_ERR_CONN_LOST`，依次排查：账密是否正确（rc=4/5）、
-  是否立即订阅了 `--down-topic`、broker 是否限制同账号只允许一个连接（可临时停掉
-  task_dispatcher 服务后再补报）。
+  是否立即订阅了 `--down-topic`、报文是否超过 1MB、broker 是否限制同账号只允许一个连接
+  （可临时停掉 task_dispatcher 服务后再补报）。
