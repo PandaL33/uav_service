@@ -27,8 +27,6 @@ MQTT/服务器参数默认读取与 launch 相同的端点覆盖文件
 """
 
 import argparse
-import base64
-import io
 import json
 import logging
 import os
@@ -53,51 +51,13 @@ if _HERE not in sys.path:
 
 from auth_utils import AuthManager  # noqa: E402
 from task_dispatcher.config import PCD_FILE_PATH, PCD_FILE_COMPRESS_PATH  # noqa: E402
+from task_dispatcher.mqtt_payload import encode_map_image  # noqa: E402
 from task_dispatcher.point_cloud_crop import PointCloudCrop  # noqa: E402
 from task_dispatcher.point_cloud_manager import PointCloudManager  # noqa: E402
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger('task_dispatcher.resume_build_map')
-
-# broker 单包上限 1MB，超出会被直接断开（CONN_LOST），留少量余量
-MQTT_MAX_PAYLOAD = 1020 * 1024
-
-
-def encode_map_image(image_path, overhead_bytes, max_payload=MQTT_MAX_PAYLOAD):
-    """生成 picBase64，必要时压缩以适配 MQTT 单包上限，保持像素尺寸不变。
-
-    返回 (base64 字符串, 说明)。无法压到上限内时返回空字符串。
-    """
-    def _fits(data):
-        return len(base64.b64encode(data)) + overhead_bytes <= max_payload
-
-    with open(image_path, 'rb') as fp:
-        raw = fp.read()
-    if _fits(raw):
-        return base64.b64encode(raw).decode(), '原始 PNG'
-
-    with Image.open(image_path) as img:
-        gray = img.convert('L')
-
-        buf = io.BytesIO()
-        gray.save(buf, format='PNG', optimize=True)
-        if _fits(buf.getvalue()):
-            return base64.b64encode(buf.getvalue()).decode(), '灰度 PNG'
-
-        # 栅格图颜色很少，量化后无损压缩率更高；dither=0 避免抖动产生噪点
-        for colors in (8, 4, 2):
-            buf = io.BytesIO()
-            gray.quantize(colors=colors, dither=0).save(buf, format='PNG', optimize=True)
-            if _fits(buf.getvalue()):
-                return base64.b64encode(buf.getvalue()).decode(), f'{colors} 色灰度 PNG'
-
-        buf = io.BytesIO()
-        gray.point(lambda v: 255 if v > 127 else 0, '1').save(buf, format='PNG', optimize=True)
-        if _fits(buf.getvalue()):
-            return base64.b64encode(buf.getvalue()).decode(), '二值 PNG'
-
-    return '', '超过 MQTT 单包上限，picBase64 置空（平台可按 fileId 取图）'
 
 # 与 launch/task_dispatcher.launch.py 的内置默认值保持一致，实际值由端点覆盖文件提供
 DEFAULTS = {

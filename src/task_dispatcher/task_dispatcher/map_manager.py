@@ -23,6 +23,7 @@ from requests.auth import HTTPBasicAuth
 from task_dispatcher.perform_action_manager import PerformActionManager
 from task_dispatcher.ros2_topic_subscriber import Ros2TopicSubscriber
 from task_dispatcher.point_cloud_manager import PointCloudManager
+from task_dispatcher.mqtt_payload import encode_map_image
 from auth_utils import AuthManager 
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
 
@@ -859,7 +860,7 @@ class MapManager:
                 'progress': 100,  # 完成进度，百分比
                 'fileId': file_id,
                 'pcdFileId': pcd_file_id,
-                'picBase64': map_image_base64,
+                'picBase64': '',
                 'marks': [],  # 标注信息列表
                 'mapWidth': map_width,
                 'mapHeight': map_height,
@@ -871,6 +872,12 @@ class MapManager:
                 }
             }
                     
+            # broker 单包上限 1MB，超限报文会被断开；压缩预览图以适配，像素尺寸保持不变
+            overhead = len(json.dumps(progress_message, ensure_ascii=False)) + 512
+            progress_message['picBase64'], pic_note = encode_map_image(map_image_path, overhead)
+            if pic_note != '原始 PNG':
+                logger.warning(f'picBase64 已按 MQTT 单包上限处理: {pic_note}')
+
             # 发布地图构建完成消息
             self.report_build_map_progress(200, 'ok', progress_message)
             print_data = progress_message.copy()
