@@ -11,9 +11,6 @@ Environment="ROS_DOMAIN_ID=0"
 Environment="ROS_LOCALHOST_ONLY=0"
 Environment="ROS_LOG_DIR=/home/cat/uav_service/logs"
 Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"
-Environment="MESA_LOADER_DRIVER_OVERRIDE=zink"
-Environment="LIBGL_ALWAYS_SOFTWARE=1"
-Environment="EGL_PLATFORM=egl"
 # DDS 切换: 去掉注释即对本 unit 生效(默认保持注释 = 仍用 rmw_fastrtps_cpp), 改后需
 # sudo systemctl daemon-reload && sudo systemctl restart <本unit>。所有互相通信的进程与
 # 机器必须同步切换, 混用不会互通而是直接失联。本机若无此 xml: 先拷过去, URI 只能写绝对路径。
