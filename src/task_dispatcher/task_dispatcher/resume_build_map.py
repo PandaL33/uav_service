@@ -66,13 +66,14 @@ DEFAULTS = {
     'mqtt_username': '',
     'mqtt_password': '',
     'mqtt_response_topic': '/robot/up',
+    'mqtt_topic': '',
     'robot_sn': 'UAV00001',
     'server_url': 'https://192.168.200.131:8075',
     'version': '1.1',
 }
 
 VALID_KEYS = ('mqtt_broker', 'mqtt_port', 'mqtt_username', 'mqtt_password',
-              'mqtt_response_topic', 'robot_sn', 'server_url')
+              'mqtt_response_topic', 'mqtt_topic', 'robot_sn', 'server_url')
 
 
 def _candidate_endpoint_files():
@@ -172,6 +173,7 @@ def publish_build_map(args, body):
         client.username_pw_set(args.username, args.password)
 
     connected = threading.Event()
+    published = threading.Event()
     conn_result = {'rc': None}
 
     def _rc_value(reason_code):
@@ -182,31 +184,54 @@ def publish_build_map(args, body):
         code = _rc_value(reason_code)
         conn_result['rc'] = code
         if code == 0:
+            # 平台网关要求连接后立即订阅下行主题，否则会被主动断开
+            _client.subscribe(args.down_topic, qos=0)
+            logger.info('MQTT 已连接并订阅 %s', args.down_topic)
             connected.set()
         else:
             logger.error('MQTT 连接被拒绝，rc=%s（4=用户名或密码错误，5=未授权）', code)
 
     def on_disconnect(_client, _userdata, *extra):
+        connected.clear()
         logger.warning('MQTT 连接断开: %s', extra)
+
+    def on_publish(_client, _userdata, _mid, *extra):
+        published.set()
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
+    client.on_publish = on_publish
 
+    payload = json.dumps(message)
     client.connect(args.broker, args.port, 60)
     client.loop_start()
     try:
-        if not connected.wait(timeout=15):
-            raise RuntimeError(
-                f'MQTT 连接失败（{args.broker}:{args.port}, rc={conn_result["rc"]}），'
-                '请检查 broker/端口是否正确、用户名密码是否传入'
-            )
-        # 与 task_dispatcher 一致使用 QoS 0，避免依赖 broker 的 PUBACK
-        info = client.publish(args.response_topic, json.dumps(message), qos=0)
-        info.wait_for_publish(timeout=10)
-        if info.rc != mqtt.MQTT_ERR_SUCCESS:
-            raise RuntimeError(f'BuildMap 消息发布失败, rc={info.rc}')
-        if not info.is_published():
-            raise RuntimeError('BuildMap 消息发布超时')
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                if not client.is_connected():
+                    client.reconnect()
+                if not connected.wait(timeout=15):
+                    raise RuntimeError(
+                        f'MQTT 连接失败（{args.broker}:{args.port}, rc={conn_result["rc"]}），'
+                        '请检查 broker/端口是否正确、用户名密码是否传入'
+                    )
+                time.sleep(0.5)
+                published.clear()
+                # 与 task_dispatcher 一致使用 QoS 0，避免依赖 broker 的 PUBACK
+                info = client.publish(args.response_topic, payload, qos=0)
+                if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                    raise RuntimeError(f'发布失败, rc={info.rc}')
+                if not published.wait(timeout=10):
+                    raise RuntimeError('发布超时（10s 内未触发 on_publish）')
+                last_error = None
+                break
+            except Exception as exc:  # 连接被断开等情况，重连再试
+                last_error = exc
+                logger.warning('第 %d 次上报失败: %s', attempt, exc)
+                time.sleep(2)
+        if last_error is not None:
+            raise RuntimeError(f'BuildMap 上报失败: {last_error}')
         time.sleep(0.5)
     finally:
         client.loop_stop()
@@ -231,6 +256,8 @@ def parse_args():
     parser.add_argument('--username', default=str(defaults['mqtt_username']))
     parser.add_argument('--password', default=str(defaults['mqtt_password']))
     parser.add_argument('--response-topic', default=str(defaults['mqtt_response_topic']))
+    parser.add_argument('--down-topic', default=str(defaults['mqtt_topic']),
+                        help='连接后需订阅的下行主题，默认 /UAV/<sn>/dn')
     parser.add_argument('--sn', default=str(defaults['robot_sn']))
     parser.add_argument('--version', default=str(defaults['version']))
     parser.add_argument('--server-url', default=str(defaults['server_url']))
@@ -245,9 +272,11 @@ def main():
     )
     args = parse_args()
     args.server_url = args.server_url.rstrip('/')
-    logger.info('MQTT: %s:%s (user=%s) sn=%s topic=%s server=%s',
+    if not args.down_topic:
+        args.down_topic = f'/UAV/{args.sn}/dn'
+    logger.info('MQTT: %s:%s (user=%s) sn=%s down=%s up=%s server=%s',
                 args.broker, args.port, args.username or '<empty>',
-                args.sn, args.response_topic, args.server_url)
+                args.sn, args.down_topic, args.response_topic, args.server_url)
     if not args.username:
         logger.warning('未提供 MQTT 用户名，若 broker 开启鉴权会连接被拒（rc=4/5）')
 

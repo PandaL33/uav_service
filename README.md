@@ -1166,6 +1166,7 @@ python3 -m task_dispatcher.resume_build_map --task-id <buildmap_id> \
 | `--file-id` | 空 | 复用已上传的 png 文件 ID，跳过 png 上传 |
 | `--broker/--port/--username/--password` | 端点配置 | MQTT 连接参数 |
 | `--response-topic` | `/robot/up` | 上行主题 |
+| `--down-topic` | `/UAV/<sn>/dn` | 连接后立即订阅的下行主题（部分网关不订阅会被断开） |
 | `--sn/--version` | 端点配置 | 机器人序列号与版本 |
 | `--server-url` | 端点配置 | 平台地址，用于取上传 token 与文件上传 |
 | `--dry-run` | 关闭 | 只出图并打印报文（不含 `picBase64`），不上传不发布 |
@@ -1185,4 +1186,7 @@ MQTT/服务器参数的默认值按与 launch 相同的顺序读取端点覆盖�
 
 - 用运行 task_dispatcher 的同一用户执行，避免 `~` 展开到不同目录；
 - 不要在补跑前重启 `build_map_drone.service` / LIO；
-- 脚本对 `PCD_FILE_COMPRESS_PATH` 与 `--image` 的上级目录会自动创建。
+- 脚本对 `PCD_FILE_COMPRESS_PATH` 与 `--image` 的上级目录会自动创建；
+- 若日志出现 `MQTT 连接断开: MQTT_ERR_CONN_LOST`，依次排查：账密是否正确（rc=4/5）、
+  是否立即订阅了 `--down-topic`、broker 是否限制同账号只允许一个连接（可临时停掉
+  task_dispatcher 服务后再补报）。
