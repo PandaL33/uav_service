@@ -133,19 +133,25 @@ class PointCloudManager:
 
         logger.info(f"无人机已经降落，任务已完成")
 
-        # 处理点云数据
-        file_id, col_radar, row_radar = self.process_point_cloud_data()
+        try:
+            # 处理点云数据
+            file_id, col_radar, row_radar = self.process_point_cloud_data()
+            if not file_id:
+                raise RuntimeError(
+                    f"点云数据处理失败，未生成有效点云文件（请检查 LIO 保存路径与 PCD_FILE_PATH 是否一致）: {PCD_FILE_PATH}"
+                )
+        finally:
+            # 停止点云服务（不检查错误）
+            logger.info('停止fast_lio.service服务...')
+            subprocess.Popen(['sudo', 'systemctl', 'stop', 'build_map_drone.service'])
+            logger.info('停止fast_lio.service服务操作完成')
 
-        # 停止点云服务（不检查错误）
-        logger.info('停止fast_lio.service服务...')
-        subprocess.Popen(['sudo', 'systemctl', 'stop', 'build_map_drone.service'])
-        logger.info('停止fast_lio.service服务操作完成')
+            # 确保重置状态
+            self.reset_status()
 
         logger.info(f"执行巡检任务task_id={task_id}, 任务已完成")
         # self._report_task_status(task_id, TaskStatus.COMPLETED.value, '任务已完成', file_id, 'pcd')
-        # 确保重置状态
-        self.reset_status()
-        
+
         return file_id, col_radar, row_radar
 
     def reset_status(self):
