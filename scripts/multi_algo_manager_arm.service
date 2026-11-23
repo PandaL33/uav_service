@@ -8,7 +8,8 @@ User=cat
 WorkingDirectory=/home/cat/uav_service
 
 Environment="ROS_DOMAIN_ID=27"
-Environment="ROS_LOCALHOST_ONLY=0"
+# 发现风暴治理：DDS 收进回环（与 ego_planner.service 同步设置，混用会失联）
+Environment="ROS_LOCALHOST_ONLY=1"
 Environment="ROS_LOG_DIR=/home/cat/uav_service/logs"
 Environment="PYTHONPATH=$PYTHONPATH:/home/cat/.local/lib/python3.10/site-packages"
 # DDS 切换: 去掉注释即对本 unit 生效(默认保持注释 = 仍用 rmw_fastrtps_cpp), 改后需
