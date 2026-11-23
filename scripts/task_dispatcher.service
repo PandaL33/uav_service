@@ -20,6 +20,12 @@ Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"
 # 创建日志目录
 ExecStartPre=/bin/mkdir -p /home/cat/uav_service/logs
 
+# MPP 库(ffmpeg rkmpp 硬解内部)会通过 syslog 持续刷 H265D_PARSER 等报错, 与业务无关.
+# 屏蔽本 unit 的 /dev/log, 使其 syslog 消息不再进入 journal; 本服务日志走 stdout, 不受影响.
+# mpp_syslog_perror=0 同时关掉 MPP 向 stderr 的重复输出(否则会写进 ffmpeg 日志文件).
+InaccessiblePaths=-/dev/log
+Environment="mpp_syslog_perror=0"
+
 # 启动 ROS2 节点，日志同时输出到 journal 和文件
 ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch task_dispatcher task_dispatcher.launch.py | tee -a /home/cat/uav_service/logs/task_dispatcher.log"
 
