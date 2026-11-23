@@ -672,9 +672,11 @@ class VideoPreviewManager:
         except OSError as e:
             logger.error(f'读取 ffmpeg 日志失败: {e}')
             return
-        meaningful = [ln.rstrip() for ln in tail if not self._is_ffmpeg_tail_noise(ln)][-lines:]
+        meaningful = [ln.strip() for ln in tail if not self._is_ffmpeg_tail_noise(ln)]
+        # 相同行只保留一次（解码器/解析器会连续刷同样的报错）；最终压成单行输出，避免刷屏
+        deduped = list(dict.fromkeys(meaningful))[-lines:]
         # ffmpeg 每次启动的日志带随机对象地址（如 [tcp @ 0xaaaab1cc0]），归一化后才能判断是否同一错误
-        signature = re.sub(r'0x[0-9a-fA-F]+', '0xADDR', '\n'.join(meaningful))
+        signature = re.sub(r'0x[0-9a-fA-F]+', '0xADDR', ' | '.join(deduped))
         now = time.time()
         last_sig, last_time, suppressed = self._ffmpeg_tail_state.get(camera_id, ('', 0.0, 0))
         if signature == last_sig and now - last_time < 60.0:
@@ -685,8 +687,10 @@ class VideoPreviewManager:
                                 30.0)
             return
         self._ffmpeg_tail_state[camera_id] = (signature, now, 0)
-        detail = os.linesep.join(meaningful) if meaningful else '（无有效诊断行）'
-        logger.error(f'ffmpeg 日志尾部（{log_path}）:{os.linesep}' + detail)
+        summary = ' | '.join(deduped) if deduped else '（无有效诊断行）'
+        if len(summary) > 400:
+            summary = summary[:397] + '...'
+        logger.error(f'ffmpeg 日志尾部（{log_path}）: {summary}')
         self._log_throttled(f'stream_dead_{camera_id}', logger.error,
                             f'视频流可能需要重新启动: cameraId={camera_id}', 30.0)
 
@@ -698,6 +702,9 @@ class VideoPreviewManager:
         'Output #', 'Metadata:', 'Duration:', 'creation_time',
         'comment', 'title', 'handler_name', 'vendor_id',
         'Last message repeated',
+        # Rockchip MPP 解码器解析报错（同一帧连续刷屏，对定位退出原因无帮助）
+        'H265D_PARSER', 'mpp', 'current stream is no right',
+        'Error parsing NAL unit', 'PPS id out of range', 'hls_slice_header error',
     )
 
     @classmethod
