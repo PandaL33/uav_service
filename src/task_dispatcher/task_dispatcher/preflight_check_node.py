@@ -173,24 +173,28 @@ class PreFlightCheckNode():
         # 2) 系统级解锁检查（VehicleStatus 直接暴露的状态）
         if vehicle_status.safety_button_available and not vehicle_status.safety_off:
             failures.append('安全开关未解锁（需先按下安全按钮）')
-        # 不检查 usb_connected：本机 USB 为长期固定链路（机载板<->飞控 mavlink），
-        # 且该字段一旦收到 USB 遥测就置位且永不清零（VehicleStatus.msg），必然常触发。
+        # if vehicle_status.usb_connected:
+        #     failures.append('USB 已连接（PX4 禁止带 USB 起飞，需断开并重启飞控）')
+        # 本机 USB 为长期固定链路（机载板<->飞控 mavlink），且该字段一旦收到 USB 遥测
+        # 就置位且永不清零（VehicleStatus.msg），必然常触发，故不检查。
         if not vehicle_status.power_input_valid:
             failures.append('电源输入无效')
-        if vehicle_status.avoidance_system_required and not vehicle_status.avoidance_system_valid:
-            failures.append('避障系统未就绪')
-        if vehicle_status.open_drone_id_system_present and not vehicle_status.open_drone_id_system_healthy:
-            failures.append('Open Drone ID 系统未就绪')
-        if vehicle_status.parachute_system_present and not vehicle_status.parachute_system_healthy:
-            failures.append('降落伞系统未就绪')
+        # 以下系统本机未安装/不适用，注释保留：
+        # if vehicle_status.avoidance_system_required and not vehicle_status.avoidance_system_valid:
+        #     failures.append('避障系统未就绪')
+        # if vehicle_status.open_drone_id_system_present and not vehicle_status.open_drone_id_system_healthy:
+        #     failures.append('Open Drone ID 系统未就绪')
+        # if vehicle_status.parachute_system_present and not vehicle_status.parachute_system_healthy:
+        #     failures.append('降落伞系统未就绪')
         if vehicle_status.rc_calibration_in_progress:
             failures.append('遥控器校准进行中')
         if vehicle_status.calibration_enabled:
             failures.append('传感器校准进行中')
-        if vehicle_status.is_vtol and vehicle_status.in_transition_mode:
-            failures.append('VTOL 处于过渡状态')
-        if vehicle_status.is_vtol and vehicle_status.vehicle_type != 1:  # 1 = VEHICLE_TYPE_ROTARY_WING
-            failures.append('VTOL 当前不处于多旋翼模式')
+        # 本机为多旋翼，不涉及 VTOL，注释保留：
+        # if vehicle_status.is_vtol and vehicle_status.in_transition_mode:
+        #     failures.append('VTOL 处于过渡状态')
+        # if vehicle_status.is_vtol and vehicle_status.vehicle_type != 1:  # 1 = VEHICLE_TYPE_ROTARY_WING
+        #     failures.append('VTOL 当前不处于多旋翼模式')
 
         # 3) 模式要求的估计量/链路状态（FailsafeFlags，仅保留对当前模式生效的项）
         failsafe_flags = self.topic_subscriber.get_failsafe_flags()
