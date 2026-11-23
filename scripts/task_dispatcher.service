@@ -8,8 +8,11 @@ User=cat
 WorkingDirectory=/home/cat/uav_service
 
 Environment="ROS_DOMAIN_ID=0"
-# 发现风暴治理：DDS 收进回环（与 ego_planner.service 同步设置，混用会失联）
-Environment="ROS_LOCALHOST_ONLY=1"
+# 必须为 0：置 1 只限制 ROS(Fast DDS) 侧，而 MicroXRCEAgent 是独立的 CycloneDDS 参与者、
+# 单播定位器不在 lo 上 ⇒ fmu/out/* 话题名仍可发现但一帧数据收不到，comms 拿不到
+# vehicle_status/vehicle_odometry 就无法 ARM/OFFBOARD（现场只表现为"发目标点没反应"）。
+# 完整说明见主仓 rkdrone_launch/scripts/ego_planner.service 同处。风暴要从 agent 侧治。
+Environment="ROS_LOCALHOST_ONLY=0"
 Environment="ROS_LOG_DIR=/home/cat/uav_service/logs"
 Environment="PYTHONPATH=/home/cat/.local/lib/python3.10/site-packages"
 # DDS 切换: 去掉注释即对本 unit 生效(默认保持注释 = 仍用 rmw_fastrtps_cpp), 改后需
