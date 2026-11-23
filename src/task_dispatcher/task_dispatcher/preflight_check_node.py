@@ -173,8 +173,8 @@ class PreFlightCheckNode():
         # 2) 系统级解锁检查（VehicleStatus 直接暴露的状态）
         if vehicle_status.safety_button_available and not vehicle_status.safety_off:
             failures.append('安全开关未解锁（需先按下安全按钮）')
-        if vehicle_status.usb_connected:
-            failures.append('USB 已连接（PX4 禁止带 USB 起飞，需断开并重启飞控）')
+        # 不检查 usb_connected：本机 USB 为长期固定链路（机载板<->飞控 mavlink），
+        # 且该字段一旦收到 USB 遥测就置位且永不清零（VehicleStatus.msg），必然常触发。
         if not vehicle_status.power_input_valid:
             failures.append('电源输入无效')
         if vehicle_status.avoidance_system_required and not vehicle_status.avoidance_system_valid:
