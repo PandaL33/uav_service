@@ -25,17 +25,20 @@ class MessageCacheManager:
         # 缓存结构: {seq: {"message": 原始消息, "timestamp": 缓存时间戳}}
         self._cache: Dict[str, Dict[str, Any]] = {}
     
-    def add_message(self, seq: str, message: Dict[str, Any]) -> None:
+    def add_message(self, seq: str, message: Dict[str, Any], ttl_seconds: Optional[int] = None) -> None:
         """
         添加消息到缓存
         
         Args:
             seq: 消息序列号
             message: 完整的上报消息
+            ttl_seconds: 该条消息的过期时间（秒），None 则使用默认 cache_time_seconds。
+                         注册等云端响应较慢的消息可单独设置更长的 TTL。
         """
         self._cache[seq] = {
             "message": message,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "ttl": ttl_seconds if ttl_seconds is not None else self.cache_time_seconds
         }
         # 清理过期缓存
         self._maybe_clean_expired_cache()
@@ -54,8 +57,9 @@ class MessageCacheManager:
         # 查找消息
         if seq in self._cache:
             cached_data = self._cache[seq]
-            # 检查该条消息是否过期
-            if time.time() - cached_data["timestamp"] <= self.cache_time_seconds:
+            # 检查该条消息是否过期（按该条消息自身的 TTL）
+            ttl = cached_data.get("ttl", self.cache_time_seconds)
+            if time.time() - cached_data["timestamp"] <= ttl:
                 return cached_data["message"]
             else:
                 del self._cache[seq]
@@ -78,9 +82,10 @@ class MessageCacheManager:
         current_time = time.time()
         expired_seqs = []
         
-        # 找出所有过期的seq
+        # 找出所有过期的seq（按各条消息自身的 TTL）
         for seq, cached_data in self._cache.items():
-            if current_time - cached_data["timestamp"] > self.cache_time_seconds:
+            ttl = cached_data.get("ttl", self.cache_time_seconds)
+            if current_time - cached_data["timestamp"] > ttl:
                 expired_seqs.append(seq)
         
         # 删除过期的缓存

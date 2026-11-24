@@ -201,8 +201,8 @@ class Registration:
             
             logger.info(f'发送注册请求: {json.dumps(register_request)}, self.response_topic: {self.response_topic}')
             
-            # 将注册请求添加到缓存
-            message_cache_manager.add_message(register_request['seq'], register_request)
+            # 将注册请求添加到缓存（云端注册ACK可能延迟数十秒，TTL需覆盖重试周期，避免ACK到达时已过期无法匹配）
+            message_cache_manager.add_message(register_request['seq'], register_request, ttl_seconds=65)
             logger.info(f'已将注册请求加入缓存: seq={register_request["seq"]}')
             
             # 发布注册请求
@@ -477,8 +477,8 @@ class Registration:
             # 检查是否需要重新注册
             if not self.registration_status:
                 time.sleep(60)  # 注册失败后等待60秒再重试，符合用户要求的每分钟注册一次
+                logger.info('尚未注册成功，重新发送注册请求，等待云端响应')
                 self.register()
-                logger.info('注册失败，将在60秒后再次尝试')
                 continue
             
             # 检查是否需要发送心跳
