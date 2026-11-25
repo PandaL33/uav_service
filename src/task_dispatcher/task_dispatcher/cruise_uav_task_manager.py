@@ -1819,7 +1819,9 @@ class CruiseUavTaskManager:
             future = self.map_save_client.call_async(request)
             
             # 4. 等待服务调用结果（添加超时机制防止死循环）
-            service_timeout = 60.0  # 服务调用超时时间（秒）
+            # 实测 RK3588 上 saveMap（合并点云+写 300MB+ pcd）约需 100~110s，
+            # 60s 必超时，留大余量
+            service_timeout = 180.0  # 服务调用超时时间（秒）
             #rclpy.spin_until_future_complete(self.node, future, timeout_sec=service_timeout)
             start_time = time.time()
             while not future.done() and (time.time() - start_time) < service_timeout:

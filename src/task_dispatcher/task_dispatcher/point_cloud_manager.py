@@ -413,7 +413,8 @@ class PointCloudManager:
             #    在这里再对同一节点调用 spin_until_future_complete 会让同一个 wait set 被两个
             #    线程并发访问，触发 "wait set index too big"。响应会由主线程 executor 处理，
             #    这里只等待 future 完成即可（与 map_manager 推送地图的等待方式一致）。
-            service_timeout = 60.0  # 服务调用超时时间（秒）
+            # 实测 RK3588 上 saveMap（合并点云+写 300MB+ pcd）约需 100~110s，60s 必超时，留大余量
+            service_timeout = 180.0  # 服务调用超时时间（秒）
             deadline = time.time() + service_timeout
             while not future.done() and time.time() < deadline:
                 time.sleep(0.1)
