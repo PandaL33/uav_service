@@ -103,9 +103,9 @@ class PointCloudManager:
         flight_finished = False
 
         # 启动点云服务（不检查错误）
-        logger.info('启动fast_lio.service服务...')
+        logger.info('启动build_map_drone.service服务...')
         subprocess.run(['sudo', 'systemctl', 'start', 'build_map_drone.service'], timeout=30)
-        logger.info('启动fast_lio.service服务操作完成')
+        logger.info('启动build_map_drone.service服务操作完成')
         time.sleep(5)
         
         self.is_executing = True
@@ -142,9 +142,9 @@ class PointCloudManager:
                 )
         finally:
             # 停止点云服务（不检查错误）
-            logger.info('停止fast_lio.service服务...')
+            logger.info('停止build_map_drone.service服务...')
             subprocess.Popen(['sudo', 'systemctl', 'stop', 'build_map_drone.service'])
-            logger.info('停止fast_lio.service服务操作完成')
+            logger.info('停止build_map_drone.service服务操作完成')
 
             # 确保重置状态
             self.reset_status()
