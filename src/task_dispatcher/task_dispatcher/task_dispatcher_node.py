@@ -113,7 +113,27 @@ class TaskDispatcherNode(Node):
         # 降低 executor 每轮 WaitSet 重建成本：必须在任何发布/订阅创建之前
         if DISABLE_QOS_EVENT_CALLBACKS:
             disable_default_qos_event_callbacks(self)
-        
+
+        # PX4 时间同步：放在最前面，尽早把 UTC 钟面推给飞控。
+        # ulog 目录名是开日志那一刻定死的，节点后面还要初始化十几个管理器
+        # （实测约 20s），拖到末尾会让这段时间里开的日志继续用飞控板载 RTC 的旧值。
+        # 后台线程，不阻塞初始化；每次只短暂占用串口，不挡 px4_log_pull.py。
+        #
+        # 安全边界：window 秒内尝试，成功或耗尽即退出，运行期不再碰飞控时钟，
+        # 避免飞行途中时钟跳变污染日志与估计器。
+        self.declare_parameter('px4_time_sync_device', '')
+        self.declare_parameter('px4_time_sync_baudrate', 57600)
+        self.declare_parameter('px4_time_sync_window', 30.0)
+        px4_device = self.get_parameter('px4_time_sync_device').get_parameter_value().string_value
+        px4_baudrate = self.get_parameter('px4_time_sync_baudrate').get_parameter_value().integer_value
+        px4_window = self.get_parameter('px4_time_sync_window').get_parameter_value().double_value
+        self.px4_time_sync = Px4TimeSync(
+            device=px4_device if px4_device else None,
+            baudrate=px4_baudrate,
+            window=px4_window
+        )
+        self.px4_time_sync.start()
+
         # MQTT相关参数
         self.declare_parameter('mqtt_broker', 'localhost')
         self.declare_parameter('mqtt_port', 1883)
@@ -309,17 +329,6 @@ class TaskDispatcherNode(Node):
             topic_subscriber=self.ros_topic_subscriber,
         )
         #self.create_timer(300, self.check_uav_fault)
-
-        # PX4 时间同步（后台线程，不阻塞节点启动）
-        self.declare_parameter('px4_time_sync_device', '')
-        self.declare_parameter('px4_time_sync_baudrate', 57600)
-        px4_device = self.get_parameter('px4_time_sync_device').get_parameter_value().string_value
-        px4_baudrate = self.get_parameter('px4_time_sync_baudrate').get_parameter_value().integer_value
-        self.px4_time_sync = Px4TimeSync(
-            device=px4_device if px4_device else None,
-            baudrate=px4_baudrate
-        )
-        self.px4_time_sync.start()
 
         logger.info('任务派发节点已启动')
     

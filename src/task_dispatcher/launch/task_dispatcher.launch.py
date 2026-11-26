@@ -34,6 +34,7 @@ def generate_launch_description():
     server_url = LaunchConfiguration('server_url')
     px4_time_sync_device = LaunchConfiguration('px4_time_sync_device')
     px4_time_sync_baudrate = LaunchConfiguration('px4_time_sync_baudrate')
+    px4_time_sync_window = LaunchConfiguration('px4_time_sync_window')
     
     # 创建task_dispatcher节点
     task_dispatcher_node = Node(
@@ -54,7 +55,8 @@ def generate_launch_description():
                 'robot_sn': robot_sn,
                 'server_url': server_url,
                 'px4_time_sync_device': px4_time_sync_device,
-                'px4_time_sync_baudrate': px4_time_sync_baudrate
+                'px4_time_sync_baudrate': px4_time_sync_baudrate,
+                'px4_time_sync_window': px4_time_sync_window
             }
         ]
     )
@@ -121,6 +123,12 @@ def generate_launch_description():
             'px4_time_sync_baudrate',
             default_value='57600',
             description='PX4 时间同步串口波特率，默认 57600（TELEM 口）'
+        ),
+        DeclareLaunchArgument(
+            'px4_time_sync_window',
+            default_value='30.0',
+            description='PX4 时间同步尝试窗口（秒）。仅在节点启动后这段时间内尝试，'
+                        '成功或超时即退出，运行期不再修改飞控时钟。设 0 表示禁用'
         ),
 
         # 添加节点
