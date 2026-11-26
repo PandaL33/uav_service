@@ -46,6 +46,8 @@ from task_dispatcher.device_control import DeviceControl
 from task_dispatcher.command_deliver import CommandDeliver
 # uav设备故障信息检查类
 from task_dispatcher.preflight_check_node import PreFlightCheckNode
+# PX4 时间同步
+from task_dispatcher.px4_time_sync import Px4TimeSync
 
 # 配置日志
 logging.basicConfig(
@@ -307,7 +309,18 @@ class TaskDispatcherNode(Node):
             topic_subscriber=self.ros_topic_subscriber,
         )
         #self.create_timer(300, self.check_uav_fault)
-        
+
+        # PX4 时间同步（后台线程，不阻塞节点启动）
+        self.declare_parameter('px4_time_sync_device', '')
+        self.declare_parameter('px4_time_sync_baudrate', 57600)
+        px4_device = self.get_parameter('px4_time_sync_device').get_parameter_value().string_value
+        px4_baudrate = self.get_parameter('px4_time_sync_baudrate').get_parameter_value().integer_value
+        self.px4_time_sync = Px4TimeSync(
+            device=px4_device if px4_device else None,
+            baudrate=px4_baudrate
+        )
+        self.px4_time_sync.start()
+
         logger.info('任务派发节点已启动')
     
     def connect_mqtt(self):
@@ -735,6 +748,9 @@ class TaskDispatcherNode(Node):
         if hasattr(self, 'initial_pose_manager'):
             self.initial_pose_manager.shutdown()
             self.initial_pose_manager = None
+
+        if hasattr(self, 'px4_time_sync'):
+            self.px4_time_sync.stop()
 
         logger.info('任务派发节点已关闭')
 

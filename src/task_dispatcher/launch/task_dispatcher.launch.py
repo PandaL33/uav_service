@@ -32,6 +32,8 @@ def generate_launch_description():
     mqtt_client_id = LaunchConfiguration('mqtt_client_id')
     robot_sn = LaunchConfiguration('robot_sn')
     server_url = LaunchConfiguration('server_url')
+    px4_time_sync_device = LaunchConfiguration('px4_time_sync_device')
+    px4_time_sync_baudrate = LaunchConfiguration('px4_time_sync_baudrate')
     
     # 创建task_dispatcher节点
     task_dispatcher_node = Node(
@@ -50,7 +52,9 @@ def generate_launch_description():
                 'mqtt_response_topic': mqtt_response_topic,
                 'mqtt_client_id': mqtt_client_id,
                 'robot_sn': robot_sn,
-                'server_url': server_url
+                'server_url': server_url,
+                'px4_time_sync_device': px4_time_sync_device,
+                'px4_time_sync_baudrate': px4_time_sync_baudrate
             }
         ]
     )
@@ -108,7 +112,17 @@ def generate_launch_description():
             default_value='1.1',
             description='版本号'
         ),
-        
+        DeclareLaunchArgument(
+            'px4_time_sync_device',
+            default_value='',
+            description='PX4 时间同步串口设备，如 /dev/ttyACM0。留空则自动探测'
+        ),
+        DeclareLaunchArgument(
+            'px4_time_sync_baudrate',
+            default_value='57600',
+            description='PX4 时间同步串口波特率，默认 57600（TELEM 口）'
+        ),
+
         # 添加节点
         task_dispatcher_node
     ])
